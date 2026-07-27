@@ -1,0 +1,29 @@
+{
+  "name": "agentsystem-mcp-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Servidor MCP só-de-leitura sobre a BD de referência do distribuidor de materiais de construção.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "inspector": "npm run build && npx @modelcontextprotocol/inspector node dist/index.js",
+    "teste": "npm run build && tsx scripts/testeCamadas.ts",
+    "cobertura": "tsx scripts/coberturaEvals.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^17.4.2",
+    "libpg-query": "^18.1.2",
+    "pg": "^8.22.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.20.0",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3"
+  }
+}

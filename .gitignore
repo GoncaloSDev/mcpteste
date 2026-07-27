@@ -1,0 +1,11 @@
+# Segredos — o .env é local, só o .env.example é versionado
+.env
+
+# Node
+node_modules/
+dist/
+npm-debug.log*
+
+# Editores
+.vscode/
+.idea/
