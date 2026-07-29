@@ -20,10 +20,15 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { loadModule } from "libpg-query";
 
 import { arrancarBaseDeDados, fecharBaseDeDados } from "./db.js";
+import { arrancarEscrita, fecharEscrita } from "./db-escrita.js";
+import { TABELAS_ESCRITA } from "./seguranca/escrita-camada1-alvo.js";
+import { registarDeleteRow } from "./tools/deleteRow.js";
 import { registarDescribeTable } from "./tools/describeTable.js";
+import { registarInsertRow } from "./tools/insertRow.js";
 import { registarListTables } from "./tools/listTables.js";
 import { registarRunQuery } from "./tools/runQuery.js";
 import { registarSampleRows } from "./tools/sampleRows.js";
+import { registarUpdateRow } from "./tools/updateRow.js";
 
 /**
  * A ARMADILHA Nº 1 DO TRANSPORTE STDIO, e a razão de todo o logging deste
@@ -74,6 +79,43 @@ async function main(): Promise<void> {
     );
   }
 
+  // --- 1b. Modo de escrita, se estiver configurado ---------------------------
+  //
+  // OPT-IN. Sem DATABASE_URL_WRITE isto devolve null em silêncio e o servidor
+  // fica exatamente como sempre foi: quatro tools, nenhuma delas capaz de
+  // escrever. É o que permite registar a MESMA build duas vezes no cliente MCP,
+  // uma entrada só-leitura e outra com escrita, sem tocar em código.
+  //
+  // Se a variável existir mas a ligação não servir — ou se for de
+  // superutilizador — o arranque FALHA. Um modo de escrita meio ligado seria
+  // pior do que nenhum.
+  const escrita = await arrancarEscrita();
+
+  if (escrita !== null) {
+    log(`ESCRITA LIGADA — current_user = ${escrita.utilizador}`);
+    log(
+      `o Postgres concede INSERT a este utilizador em ${escrita.tabelasComEscrita.length} tabelas: ` +
+        `${escrita.tabelasComEscrita.join(", ")}`,
+    );
+
+    // Confronto entre as duas listas independentes: a whitelist deste servidor e
+    // os privilégios reais do Postgres (que vêm do seed do outro repositório).
+    // Não é decorativo — é o sítio onde uma divergência entre os dois lados
+    // aparece no arranque, em vez de aparecer numa escrita que passou onde não
+    // devia. Só se avisa quando o Postgres é MAIS PERMISSIVO do que a whitelist;
+    // o contrário é seguro (a escrita é recusada pelo servidor antes de sair).
+    const aMaisNoPostgres = escrita.tabelasComEscrita.filter((t) => !TABELAS_ESCRITA.has(t));
+    if (aMaisNoPostgres.length > 0) {
+      log(
+        `AVISO: o utilizador de escrita tem INSERT em tabelas fora da whitelist deste servidor ` +
+          `(${aMaisNoPostgres.join(", ")}). As tools recusam-nas à mesma, mas os GRANT do seed ` +
+          `ficaram largos de mais — corre outra vez o seed do agentsystem-db.`,
+      );
+    }
+  } else {
+    log("modo só-leitura (DATABASE_URL_WRITE não definida).");
+  }
+
   // --- 2. O servidor MCP e as suas tools ------------------------------------
 
   const server = new McpServer({
@@ -85,7 +127,18 @@ async function main(): Promise<void> {
   registarDescribeTable(server);
   registarSampleRows(server);
   registarRunQuery(server);
-  log("4 tools registadas: list_tables, describe_table, sample_rows, run_query.");
+
+  if (escrita !== null) {
+    registarInsertRow(server);
+    registarUpdateRow(server);
+    registarDeleteRow(server);
+    log(
+      "7 tools registadas: list_tables, describe_table, sample_rows, run_query, " +
+        "insert_row, update_row, delete_row.",
+    );
+  } else {
+    log("4 tools registadas: list_tables, describe_table, sample_rows, run_query.");
+  }
 
   // --- 3. Abrir o canal ------------------------------------------------------
 
@@ -106,6 +159,7 @@ async function main(): Promise<void> {
 async function encerrar(sinal: string): Promise<void> {
   log(`recebido ${sinal}, a encerrar...`);
   await fecharBaseDeDados();
+  await fecharEscrita();
   process.exit(0);
 }
 

@@ -9,6 +9,8 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { executarSoLeitura } from "../db.js";
+import { escritaLigada } from "../db-escrita.js";
+import { TABELAS_ESCRITA } from "../seguranca/escrita-camada1-alvo.js";
 import { respostaErro, respostaOk } from "./resposta.js";
 
 interface LinhaTabela {
@@ -62,7 +64,7 @@ export function registarListTables(server: McpServer): void {
       title: "Listar tabelas",
       description:
         "Lista as tabelas do schema public da base de dados do distribuidor, com uma " +
-        "contagem aproximada de linhas e o tamanho em disco de cada uma. " +
+        "contagem aproximada de linhas, o tamanho em disco e se a tabela aceita escrita. " +
         "Usa esta tool primeiro, para saber o que existe.",
       // Uma tool sem argumentos declara um schema vazio. Não é o mesmo que
       // omitir o inputSchema: assim o cliente sabe que a tool existe e que não
@@ -73,13 +75,31 @@ export function registarListTables(server: McpServer): void {
       try {
         const resultado = await executarSoLeitura<LinhaTabela>(SQL_TABELAS);
 
+        // A flag é calculada aqui, em TypeScript, e não na query: a fonte de
+        // verdade da whitelist é o escrita-camada1-alvo.ts, e replicá-la no SQL
+        // criaria uma segunda lista para manter em sincronia dentro do MESMO
+        // repositório — que é exatamente o tipo de duplicação sem valor (a
+        // duplicação que interessa é a do lado da base, que é independente).
+        const podeEscrever = escritaLigada();
+        const tabelas = resultado.rows.map((linha) => ({
+          ...linha,
+          escrivel: podeEscrever && TABELAS_ESCRITA.has(linha.tabela),
+        }));
+
         return respostaOk({
           total_tabelas: resultado.rowCount,
+          modo_escrita: podeEscrever ? "ligado" : "desligado",
           nota:
             "linhas_aprox vem das estatísticas do planeador do Postgres, não de um COUNT(*). " +
             "É rápido mas aproximado. NULL significa que a tabela ainda nunca foi analisada " +
             "pelo autovacuum — não que esteja vazia.",
-          tabelas: resultado.rows,
+          nota_escrita: podeEscrever
+            ? "escrivel=true indica as tabelas onde insert_row, update_row e delete_row " +
+              "funcionam. As de movimento (documentos, linhas, stocks, conta corrente, " +
+              "comissões) estão bloqueadas: os totais e saldos delas dependem uns dos outros " +
+              "e a base não tem triggers que os mantenham coerentes."
+            : "Este servidor está em modo só-leitura — nenhuma tabela aceita escrita.",
+          tabelas,
         });
       } catch (erro) {
         return respostaErro(erro);

@@ -39,17 +39,43 @@ function apagarConnectionStrings(texto: string): string {
 const EXPLICACOES: Record<string, string> = {
   // A query foi cancelada por ter ultrapassado o statement_timeout da Camada 3.
   "57014": "A query foi cancelada por exceder o tempo limite de execução.",
-  // O utilizador mcp_readonly não tem SELECT nesta tabela. Não é um bug: é a
-  // primeira camada de defesa (permissões de BD) a fazer o seu trabalho.
-  "42501": "Sem permissão para aceder a esse objeto. O servidor liga-se com um utilizador só-de-leitura.",
+  // Permissões da BD a fazer o seu trabalho. No caminho de leitura significa que
+  // o mcp_readonly não tem SELECT ali; no de escrita significa que o mcp_escrita
+  // não tem INSERT/UPDATE/DELETE naquela tabela — ou seja, a camada 0 apanhou
+  // algo que a whitelist do servidor deixou passar. É informação valiosa.
+  "42501":
+    "Sem permissão para essa operação nesse objeto. O servidor usa um utilizador de leitura " +
+    "e, quando a escrita está ligada, um utilizador de escrita limitado aos dados mestre.",
   // A Camada 2 (BEGIN TRANSACTION READ ONLY) recusou uma escrita.
-  "25006": "Tentativa de escrita numa transação só-de-leitura. Este servidor só permite consultas.",
+  "25006": "Tentativa de escrita numa transação só-de-leitura. Esta operação só permite consultas.",
   "42P01": "A tabela ou vista indicada não existe. Usa a tool list_tables para veres o que existe.",
   "42703": "Uma das colunas indicadas não existe. Usa a tool describe_table para veres as colunas.",
   "42601": "Erro de sintaxe no SQL.",
   "42883": "A função indicada não existe com esses tipos de argumentos.",
   "22012": "Divisão por zero. Considera usar nullif(divisor, 0).",
   "53300": "A base de dados tem demasiadas ligações abertas neste momento.",
+
+  // --- Classe 23: violações de integridade -----------------------------------
+  // São os erros normais das tools de escrita, e nenhum deles é um bug: é o
+  // schema a recusar dados incoerentes. A base não tem CHECKs nem triggers, mas
+  // as chaves primárias, estrangeiras e as colunas NOT NULL estão lá — e são elas
+  // que tornaram possível abrir os dados mestre à escrita. Traduzi-los bem é o
+  // que permite ao modelo do outro lado corrigir sozinho em vez de desistir.
+  "23505":
+    "Já existe uma linha com essa chave. Confirma com run_query antes de criar, ou usa " +
+    "update_row se querias alterar a que já lá está.",
+  "23503":
+    "Violação de chave estrangeira. Ou o valor que indicaste não existe na tabela referida " +
+    "(cria-o primeiro), ou estás a tentar apagar uma linha que ainda é usada por outras " +
+    "tabelas. Nada foi alterado.",
+  "23502": "Uma coluna obrigatória (NOT NULL) ficou sem valor. Usa describe_table para veres quais são.",
+  "23514": "Um CHECK da tabela recusou o valor.",
+  "22001":
+    "Um texto é comprido de mais para a coluna. O describe_table mostra o tamanho máximo de " +
+    "cada uma (por exemplo varchar(120)).",
+  "22P02": "Um valor não tem o formato do tipo da coluna (por exemplo texto onde se espera um número ou uma data).",
+  "22003": "Um número está fora do intervalo aceite pela coluna.",
+  "22007": "Uma data ou hora está num formato que o Postgres não reconhece. Usa 'AAAA-MM-DD'.",
 };
 
 /**

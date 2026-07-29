@@ -40,6 +40,20 @@ export function aplicarLimite(
   limiteExplicito: number | null,
   limites: Limites,
 ): QueryLimitada {
+  // Caso 0: um LIMIT negativo. Não é uma brecha — o Postgres também o recusa —
+  // mas recusá-lo aqui dá a mensagem certa. Deixado passar, chegava lá abaixo
+  // como "LIMIT explícito" e voltava com um SQLSTATE que o erros.ts não conhece,
+  // ou seja um "Erro da base de dados (2201W)" que não ajuda ninguém.
+  //
+  // A comparação é `< 0` e não `<= 0` de propósito: LIMIT 0 é válido e devolve
+  // zero linhas, que é uma coisa legítima de se pedir (ver só as colunas).
+  if (limiteExplicito !== null && limiteExplicito < 0) {
+    throw new ErroValidacao(
+      `O LIMIT pedido (${limiteExplicito}) é negativo. ` +
+        "O LIMIT tem de ser zero ou um número positivo.",
+    );
+  }
+
   // Caso 1: o utilizador pediu mais do que o teto. Recusamos em vez de reduzir
   // à socapa — se devolvêssemos 500 linhas a quem pediu 5000, o resultado
   // parecia completo e não era, o que é pior do que um erro.

@@ -10,21 +10,61 @@
  * Correr com:  npm run cobertura
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadModule } from "libpg-query";
 
 import { validarSelectUnico } from "../src/seguranca/camada1-parser.js";
 import { aplicarLimite, lerLimitesDoAmbiente } from "../src/seguranca/camada3-limites.js";
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
 /**
  * O EVAL-QUESTIONS.md vive no repositório da base de dados, que é um projeto
- * separado — daí o caminho ter de vir de fora. O valor por omissão é o do
- * computador onde isto foi escrito; noutro sítio, define a variável:
+ * separado — por isso o caminho tem de ser descoberto, não pode ser deduzido de
+ * dentro deste repositório.
  *
- *   CAMINHO_EVALS=../mcpdbteste/EVAL-QUESTIONS.md npm run cobertura
+ * A procura é relativa a ESTE ficheiro, e não ao diretório de trabalho: assim o
+ * comando funciona igual venha de onde vier o `npm run`. Os dois nomes de pasta
+ * cobrem os dois clones habituais — o repositório chama-se `mcpdbteste`, mas é
+ * frequente ficar em disco com o nome do projeto.
  */
-const CAMINHO_EVALS =
-  process.env["CAMINHO_EVALS"] ?? "c:/DEV/agentsystem-db/EVAL-QUESTIONS.md";
+const CANDIDATOS = [
+  "../../agentsystem-db/EVAL-QUESTIONS.md",
+  "../../mcpdbteste/EVAL-QUESTIONS.md",
+];
+
+/**
+ * Devolve o caminho do EVAL-QUESTIONS.md, ou explica como o indicar.
+ *
+ * Um caminho dado à mão que não existe é ERRO, nunca cai nos candidatos: se
+ * alguém definiu a variável, quer aquele ficheiro: e correr o teste contra outro
+ * sem avisar seria pior do que falhar.
+ */
+function encontrarEvals(): string {
+  const doAmbiente = process.env["CAMINHO_EVALS"];
+  if (doAmbiente !== undefined && doAmbiente.trim() !== "") {
+    if (!existsSync(doAmbiente)) {
+      throw new Error(`CAMINHO_EVALS aponta para "${doAmbiente}", que não existe.`);
+    }
+    return doAmbiente;
+  }
+
+  for (const candidato of CANDIDATOS) {
+    const caminho = resolve(__dirname, candidato);
+    if (existsSync(caminho)) {
+      return caminho;
+    }
+  }
+
+  throw new Error(
+    "Não encontrei o EVAL-QUESTIONS.md do repositório da base de dados.\n" +
+      `Procurei em:\n${CANDIDATOS.map((c) => `  ${resolve(__dirname, c)}`).join("\n")}\n` +
+      "Indica-o com a variável de ambiente CAMINHO_EVALS, por exemplo:\n" +
+      "  CAMINHO_EVALS=../../agentsystem-db/EVAL-QUESTIONS.md npm run cobertura",
+  );
+}
 
 /** Extrai o conteúdo de todos os blocos ```sql ... ``` do markdown. */
 function extrairQueries(markdown: string): string[] {
@@ -45,10 +85,12 @@ function extrairQueries(markdown: string): string[] {
 async function main(): Promise<void> {
   await loadModule();
 
-  const markdown = readFileSync(CAMINHO_EVALS, "utf8");
+  const caminhoEvals = encontrarEvals();
+  const markdown = readFileSync(caminhoEvals, "utf8");
   const queries = extrairQueries(markdown);
   const limites = lerLimitesDoAmbiente();
 
+  console.log(`Guião: ${caminhoEvals}`);
   console.log(`${queries.length} queries encontradas em EVAL-QUESTIONS.md\n`);
 
   let aceites = 0;
