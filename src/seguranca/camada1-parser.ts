@@ -110,6 +110,35 @@ const NOS_PROIBIDOS = new Set([
 ]);
 
 /**
+ * Funções que não podem ser chamadas de dentro de um SELECT.
+ *
+ * O `VariableSetStmt` ali em cima bloqueia o COMANDO `SET`. Mas o Postgres tem a
+ * mesma funcionalidade disponível como FUNÇÃO, e uma função cabe dentro de um
+ * SELECT perfeitamente legítimo:
+ *
+ *   SELECT set_config('mcp.incluir_arquivados', 'on', false)
+ *
+ * O nó de topo é um SelectStmt, não há escrita em lado nenhum, e a query passava
+ * nas três verificações acima sem levantar uma sobrancelha. O efeito, porém, é
+ * ligar o interruptor que a política de RLS usa para revelar os registos
+ * ARQUIVADOS — e com o terceiro argumento a false o efeito dura a SESSÃO, não a
+ * transação. Como as ligações são reutilizadas do pool, uma única chamada destas
+ * deixava todas as leituras seguintes a ver arquivados.
+ *
+ * O mesmo se aplica ao statement_timeout, que é um parâmetro como qualquer
+ * outro: `set_config('statement_timeout', '0', false)` desligava a Camada 3.
+ *
+ * ISTO É REDUNDANTE DE PROPÓSITO. O seed do agentsystem-db já revoga o EXECUTE
+ * desta função ao mcp_readonly, portanto a chamada falharia na base de dados
+ * mesmo que chegasse lá. São duas defesas que não partilham ponto de falha: uma
+ * é sintática e decide aqui, sem rede; a outra é uma permissão do Postgres. Para
+ * passar, teriam de falhar as duas — e a de baixo depende de o seed ter corrido
+ * com a versão certa do código, que é precisamente o tipo de suposição que não
+ * convém ser a única coisa a segurar uma garantia.
+ */
+const FUNCOES_PROIBIDAS = new Set(["set_config"]);
+
+/**
  * Forma mínima da árvore que este ficheiro precisa de conhecer.
  *
  * O @pgsql/types traz os tipos completos da AST do Postgres, mas são centenas de
@@ -242,12 +271,58 @@ function procurarNoProibido(valor: unknown): string | null {
     if (NOS_PROIBIDOS.has(chave)) {
       return chave;
     }
+    if (chave === "FuncCall") {
+      const proibida = nomeDeFuncaoProibida(filho);
+      if (proibida !== null) {
+        return `chamada à função ${proibida}`;
+      }
+    }
     const encontrado = procurarNoProibido(filho);
     if (encontrado !== null) {
       return encontrado;
     }
   }
   return null;
+}
+
+/**
+ * Lê o nome de uma chamada de função e devolve-o se estiver na lista negra.
+ *
+ * O `funcname` é uma LISTA porque o nome pode vir qualificado: `set_config` tem
+ * um elemento, `pg_catalog.set_config` tem dois. Só interessa o ÚLTIMO — é o nome
+ * da função propriamente dito, e é o que torna irrelevante a forma como quem
+ * escreveu a query decidiu qualificá-lo.
+ *
+ * Cada elemento é um nó `String` com o texto no campo `sval`. Ler a estrutura com
+ * cuidado (e devolver null a cada passo em que ela não seja o que se espera) é
+ * deliberado: uma árvore com um formato inesperado tem de resultar em "não
+ * reconheço isto", nunca num erro que rebentasse a validação toda.
+ */
+function nomeDeFuncaoProibida(funcCall: unknown): string | null {
+  if (typeof funcCall !== "object" || funcCall === null) {
+    return null;
+  }
+  const partes = (funcCall as Record<string, unknown>)["funcname"];
+  if (!Array.isArray(partes) || partes.length === 0) {
+    return null;
+  }
+
+  const ultima = partes[partes.length - 1];
+  if (typeof ultima !== "object" || ultima === null) {
+    return null;
+  }
+
+  const no = (ultima as Record<string, unknown>)["String"];
+  if (typeof no !== "object" || no === null) {
+    return null;
+  }
+
+  const nome = (no as Record<string, unknown>)["sval"];
+  if (typeof nome !== "string") {
+    return null;
+  }
+
+  return FUNCOES_PROIBIDAS.has(nome.toLowerCase()) ? nome : null;
 }
 
 /**

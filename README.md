@@ -6,9 +6,10 @@ materiais de construção ([agentsystem-db](../agentsystem-db)).
 Expõe quatro tools a um cliente MCP (Claude Desktop, Claude Code, MCP Inspector)
 e garante, por três camadas independentes, que nenhuma delas consegue escrever.
 
-Opcionalmente — e desligado por omissão — expõe mais três tools que criam, editam
-e apagam **uma linha de cada vez** nas tabelas de dados mestre. Ver
-[Escrita](#escrita-opcional-desligada-por-omissão).
+Opcionalmente — e desligado por omissão — expõe mais cinco tools que criam,
+editam, arquivam, repõem e apagam **uma linha de cada vez** nas tabelas de dados
+mestre. Ver [Escrita](#escrita-opcional-desligada-por-omissão) e
+[Arquivo](#arquivo-soft-delete).
 
 ## Tools
 
@@ -19,13 +20,99 @@ e apagam **uma linha de cada vez** nas tabelas de dados mestre. Ver
 | `sample_rows` | Amostra de linhas de uma tabela (1 a 50, por omissão 10) |
 | `run_query` | Corre uma query SELECT, com as três camadas de validação |
 
+O `run_query` e o `sample_rows` aceitam `incluir_arquivados` (por omissão `false`)
+— ver [Arquivo](#arquivo-soft-delete).
+
 Só com `DATABASE_URL_WRITE` definida:
 
 | Tool | O que faz |
 |---|---|
 | `insert_row` | Cria uma linha numa tabela de dados mestre |
 | `update_row` | Altera uma linha, identificada pela chave primária completa |
-| `delete_row` | Apaga uma linha, identificada pela chave primária completa (exige `confirmar=true`) |
+| `archive_row` | **Arquiva** uma linha: deixa de ser vista, mas não é apagada. Reversível |
+| `restore_row` | Devolve ao ativo uma linha arquivada |
+| `delete_row` | **Destrói** uma linha já arquivada, e tudo o que lhe aponta, em cascata (`confirmar=true`) |
+
+## Arquivo (soft delete)
+
+Todas as 19 tabelas têm uma coluna `arquivado_em` (`timestamptz`, `NULL` = ativo).
+Uma linha arquivada **deixa de existir para este servidor**: não aparece no
+`run_query`, no `sample_rows`, nas contagens do `list_tables`, nem dentro de
+JOINs, subqueries ou CTEs.
+
+O que interessa perceber é **onde é que esse filtro vive**: não vive aqui. Nenhuma
+linha deste repositório acrescenta `WHERE arquivado_em IS NULL` a query nenhuma.
+Quem esconde as linhas é uma política de **Row-Level Security** do PostgreSQL,
+aplicada pelo seed do `agentsystem-db`.
+
+A razão é o `run_query`, que aceita SQL escrito de fora. Filtrar em TypeScript
+obrigaria a reescrever a árvore de cada `SELECT` para lhe acrescentar a condição
+em todas as tabelas mencionadas, incluindo as de dentro de subqueries e CTEs. Um
+único caso esquecido não dá erro nenhum — devolve linhas arquivadas em silêncio,
+que é exatamente o que a funcionalidade existe para impedir. Com o filtro no
+planeador do Postgres não há nada a reescrever e não há casos a esquecer.
+
+```
+run_query: SELECT count(*) FROM clientes WHERE no_cli = 1001   ->  0 linhas
+run_query: ... com incluir_arquivados=true                     ->  1 linha
+```
+
+### Arquivar, repor, destruir
+
+```
+archive_row  (clientes, {no_cli: 1001})                  reversível, é o caminho normal
+restore_row  (clientes, {no_cli: 1001})                  desfaz o anterior, sem perdas
+delete_row   (clientes, {no_cli: 1001})                  pré-visualiza; NÃO apaga
+delete_row   (clientes, {no_cli: 1001}, confirmar: true) destrói, e leva o resto atrás
+```
+
+**Uma linha só pode ser apagada depois de arquivada.** Não há atalho: são duas
+chamadas separadas, com um estado reversível pelo meio. É nesse intervalo que um
+engano se vê e se desfaz — um único pedido mal formado nunca destrói nada.
+
+`arquivado_em` não se altera por `insert_row` nem por `update_row`. Se se
+alterasse, o pré-requisito acima deixava de significar seja o que for, porque
+qualquer update genérico o satisfazia.
+
+### O que o `delete_row` faz agora, e porque é que é diferente
+
+Todas as chaves estrangeiras desta base têm `ON DELETE CASCADE`. Apagar um cliente
+já **não** é recusado por ter documentos: apaga o cliente, os documentos de venda,
+as linhas desses documentos, os movimentos de conta corrente e as comissões. Um
+`taxas_iva` arrasta famílias, artigos, preços, stocks e linhas de documento.
+
+Essa cascata é executada pelo Postgres, por gatilhos de integridade referencial
+que correm com os privilégios do dono das tabelas — **não passam pela whitelist
+deste servidor, nem pelas políticas de RLS, nem pela guarda de linhas da Camada
+3**. Nenhuma camada deste projeto vê essas linhas a desaparecer.
+
+Por isso o `delete_row` percorre o grafo de chaves estrangeiras antes de apagar e
+conta, tabela a tabela, o que vai levar consigo. Chamado **sem** `confirmar`, não
+apaga nada e devolve só essa contagem:
+
+```json
+{
+  "operacao": "pre_visualizacao",
+  "apagado": false,
+  "linhas_que_seriam_arrastadas": 654,
+  "cascata": [
+    { "tabela": "linhas_doc",     "linhas": 512, "via": "linhas_doc.id_doc -> docs_venda.id" },
+    { "tabela": "cc_clientes",    "linhas":  74, "via": "cc_clientes.cod_cli -> clientes.no_cli" },
+    { "tabela": "docs_venda",     "linhas":  40, "via": "docs_venda.no_cli -> clientes.no_cli" },
+    { "tabela": "comissoes_vend", "linhas":  28, "via": "comissoes_vend.id_doc -> docs_venda.id" }
+  ]
+}
+```
+
+### Encontrar o que está arquivado
+
+O `list_tables` traz uma coluna `arquivadas` por tabela, e o `describe_table` traz
+`linhas_arquivadas`. Para ver as linhas propriamente ditas:
+
+```
+run_query com incluir_arquivados=true:
+  SELECT no_cli, nome, arquivado_em FROM clientes WHERE arquivado_em IS NOT NULL
+```
 
 ## As três camadas
 
@@ -142,6 +229,34 @@ npm run teste:escrita   # 20 verificações; cria, edita e apaga um cliente de t
 
 ## Atualizar uma instalação anterior
 
+### Vens de antes do arquivo (soft delete)?
+
+Faz primeiro a parte do `agentsystem-db` — o arquivo depende de uma coluna nova e
+de políticas de RLS que só o seed cria. Sem isso, este servidor arranca e falha à
+primeira tool.
+
+```powershell
+git pull
+npm install
+npm run build
+```
+
+O `.env` não muda. As tools novas (`archive_row`, `restore_row`) aparecem sozinhas
+se já tinhas a `DATABASE_URL_WRITE` definida; sem ela o servidor continua com as 4
+de leitura, agora com o parâmetro `incluir_arquivados`.
+
+**O `delete_row` mudou de significado** — deixou de ser o "apagar" do dia-a-dia e
+passou a ser destruição definitiva em cascata, só possível depois de
+`archive_row`. Ver [Arquivo](#arquivo-soft-delete). Quem tivesse automatismos a
+chamá-lo passa a receber um erro explícito, não um apagar silencioso.
+
+```powershell
+npm run teste            # 22/22
+npm run teste:escrita    # 31/31 — precisa da DATABASE_URL_WRITE
+```
+
+### Vens de antes das tools de escrita?
+
 Se já tinhas este servidor a correr **antes de existirem as tools de escrita**, é
 este o caminho. Faz primeiro a parte do
 [agentsystem-db](../agentsystem-db#atualizar-uma-instalação-anterior) — sem o role
@@ -231,7 +346,8 @@ Com a escrita ligada, as duas linhas do meio passam a ser quatro:
 [mcp] current_user = mcp_readonly
 [mcp] ESCRITA LIGADA — current_user = mcp_escrita
 [mcp] o Postgres concede INSERT a este utilizador em 12 tabelas: armazens, artfam, ...
-[mcp] 7 tools registadas: list_tables, describe_table, sample_rows, run_query, insert_row, update_row, delete_row.
+[mcp] 9 tools registadas: list_tables, describe_table, sample_rows, run_query, insert_row, update_row, archive_row, restore_row, delete_row.
+[mcp] arquivo: archive_row esconde (reversível); delete_row destrói em cascata e exige que a linha já esteja arquivada.
 ```
 
 Se aparecerem 19 tabelas em vez de 12, os `GRANT` do seed ficaram largos de mais
@@ -435,11 +551,78 @@ claude mcp add distribuidor --env DATABASE_URL_READONLY="postgresql://mcp_readon
 Ou, para o servidor ficar disponível só neste projeto, um `.mcp.json` na raiz com
 o mesmo conteúdo do bloco `mcpServers` acima.
 
+## Transporte HTTP (Streamable HTTP)
+
+O stdio acima é o modo de desenvolvimento local: um processo por cliente,
+lançado pelo próprio cliente. O **Streamable HTTP** é o outro cabo pelo qual o
+mesmo servidor pode ser servido — um processo à escuta num porto, vários
+clientes ao mesmo tempo — e é o transporte que a secção 5.3 do
+`docs/agentsystem-guide.md` exige para as ferramentas dos agentes.
+
+```powershell
+npm run build
+npm run start:http          # ou: npm run dev:http (sem compilar)
+```
+
+```
+[mcp] servidor pronto, à escuta em http://127.0.0.1:3000/mcp (Streamable HTTP).
+```
+
+Para o apontar o Inspector: `npx @modelcontextprotocol/inspector`, e na UI
+escolher o transporte **Streamable HTTP** com o URL `http://127.0.0.1:3000/mcp`
+(em vez de deixar o Inspector lançar o processo).
+
+**As tools são exatamente as mesmas**, e não por coincidência: os dois pontos de
+entrada — `src/index.ts` e `src/http.ts` — constroem o servidor pela mesma função
+`criarServidor()` do `src/servidor.ts`. Uma tool nova aparece nos dois modos sem
+ninguém se lembrar disso.
+
+Um endpoint, três métodos, como manda a especificação do transporte:
+
+| Método | Para quê |
+|---|---|
+| `POST /mcp` | as mensagens JSON-RPC; a resposta vem em SSE na mesma ligação |
+| `GET /mcp` | stream SSE avulsa — notificações do servidor e retoma (`Last-Event-ID`) |
+| `DELETE /mcp` | encerrar a sessão |
+
+**Sessões com estado.** O `initialize` abre uma sessão e o servidor devolve o
+`Mcp-Session-Id` num cabeçalho; todos os pedidos seguintes têm de o trazer. Os
+pools de ligação **não** pertencem à sessão — são do processo, abertos uma vez no
+arranque — e é isso que torna uma sessão barata: um `McpServer` e as closures das
+suas tools, mais nada. O raciocínio completo, incluindo porque não é *stateless*,
+está no cabeçalho do `src/http.ts`.
+
+### O que ainda não está aqui
+
+Este modo é, para já, **só o transporte a funcionar localmente**. Por resolver,
+por ordem de importância:
+
+- **Sem autenticação e sem TLS.** Quem alcançar o porto chama as tools. Por isso
+  o servidor liga-se a `127.0.0.1` por omissão — mudar isso com `MCP_HTTP_HOST`
+  expõe a base de dados à rede. O guia trata disto a partir da secção 5.5/5.6;
+- **Sem multi-tenant.** Todas as sessões partilham os mesmos dois pools e,
+  portanto, a mesma identidade no Postgres (Fase 1 do guia);
+- **Sem rate limiting**;
+- **Sessões sem expiração.** Um cliente que desapareça sem fazer `DELETE` deixa a
+  sessão em memória até o processo reiniciar;
+- **Sem `EventStore`.** A retoma por `Last-Event-ID` funciona dentro do processo,
+  mas o estado não é partilhado — duas instâncias atrás de um balanceador exigem
+  *sticky sessions* ou um armazenamento comum (Redis).
+
+O que **está** feito é a validação do cabeçalho `Origin` (só origens locais, ou
+as que a `MCP_HTTP_ORIGENS` listar). Não é autenticação: é a proteção contra *DNS
+rebinding* que a especificação do MCP recomenda, e sem ela qualquer página aberta
+no browser desta máquina podia correr queries sobre a base de dados. Clientes
+nativos, que não enviam `Origin`, passam.
+
 ## Estrutura
 
 ```
 src/
-  index.ts                    arranque, registo das tools, transporte stdio
+  index.ts                    ponto de entrada STDIO (desenvolvimento local)
+  http.ts                     ponto de entrada Streamable HTTP, sobre Hono
+  servidor.ts                 arranque, criação do McpServer, encerramento — partilhado
+  log.ts                      o log dos dois modos, e porque vai tudo para o stderr
   db.ts                       pool de LEITURA + CAMADA 2 (transação READ ONLY)
   db-escrita.ts               pool de ESCRITA + transação com guarda de linhas
   erros.ts                    sanitização das mensagens que saem para o cliente
@@ -449,9 +632,12 @@ src/
     camada3-limites.ts        LIMIT automático / recusa acima do máximo
     escrita-camada1-alvo.ts   whitelist de tabelas, colunas e chave primária
     escrita-camada3-linhas.ts a guarda: exatamente uma linha, ou ROLLBACK
+    arquivo.ts                o soft delete — e a explicação de porque NÃO filtra
+    cascata.ts                conta o que um apagar leva consigo, antes de o levar
   tools/
     listTables.ts  describeTable.ts  sampleRows.ts  runQuery.ts
     insertRow.ts   updateRow.ts      deleteRow.ts
+    archiveRow.ts  restoreRow.ts
     escritaComum.ts           schema Zod e fragmentos de SQL partilhados
     resposta.ts               formatação JSON das respostas
 scripts/
@@ -474,6 +660,9 @@ Todas com valores por omissão sensatos; ver o `.env.example`.
 | `MCP_LIMITE_AUTOMATICO` | 200 | `LIMIT` acrescentado a queries sem um |
 | `MCP_LIMITE_MAXIMO` | 500 | `LIMIT` explícito máximo aceite |
 | `DATABASE_URL_WRITE` | *(vazia)* | Liga as tools de escrita. Vazia = servidor só-de-leitura |
+| `MCP_HTTP_PORT` | 3000 | Porto do endpoint MCP (só no modo HTTP) |
+| `MCP_HTTP_HOST` | 127.0.0.1 | Interface onde escuta. `0.0.0.0` expõe à rede — ver os avisos acima |
+| `MCP_HTTP_ORIGENS` | *(vazia)* | Origens aceites além das locais, separadas por vírgula |
 
 O limite de linhas por escrita **não** é configurável, de propósito: é sempre 1.
 Uma variável de ambiente para o subir só serviria para desligar a defesa.
@@ -481,11 +670,13 @@ Uma variável de ambiente para o subir só serviria para desligar a defesa.
 ## Notas
 
 **`npm audit` reporta 2 vulnerabilidades moderadas.** Ambas são a mesma coisa:
-`@hono/node-server`, uma dependência transitiva do SDK do MCP, com um problema de
-*path traversal* no `serve-static`. Esse código só é usado pelo transporte HTTP;
-este servidor usa exclusivamente stdio e nunca o carrega. A correção que o npm
-sugere é descer o SDK uma versão major, o que traria problemas reais em troca de
-um risco que aqui não existe.
+`@hono/node-server` com um problema de *path traversal* no `serve-static`. Desde
+o transporte HTTP que este pacote deixou de ser só uma dependência transitiva do
+SDK do MCP e passou a ser usado diretamente — mas o que se usa dele é o `serve`,
+não o `serve-static`. Este servidor não serve ficheiros estáticos e nunca importa
+o módulo em causa: o único caminho é o `/mcp`, e quem responde nele é o
+transporte do SDK. A correção que o npm sugere é descer o SDK uma versão major,
+o que traria problemas reais em troca de um risco que aqui não existe.
 
 **Funções customizadas no schema.** O schema atual só tem tabelas. Uma função
 acrescentada mais tarde seria chamável a coberto de um `SELECT`, e a Camada 1

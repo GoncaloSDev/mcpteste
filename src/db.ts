@@ -9,6 +9,7 @@
 
 import pg from "pg";
 import { ErroValidacao } from "./erros.js";
+import { GUC_INCLUIR_ARQUIVADOS } from "./seguranca/arquivo.js";
 
 const { Pool } = pg;
 
@@ -127,9 +128,22 @@ export async function arrancarBaseDeDados(): Promise<IdentidadeLigacao> {
  *    psql -U admin_dist -c "BEGIN TRANSACTION READ ONLY; UPDATE clientes SET nome='x';"
  *  responde "ERROR: cannot execute UPDATE in a read-only transaction".)
  */
+export interface OpcoesLeitura {
+  /**
+   * Levantar o véu do arquivo SÓ nesta transação.
+   *
+   * Por omissão false, e é isso que faz o esquecimento ser seguro: quem não
+   * souber que o arquivo existe escreve `executarSoLeitura(sql)` e não vê
+   * arquivados, que é o comportamento correto. Ver o arquivo é que exige um ato
+   * deliberado.
+   */
+  incluirArquivados?: boolean;
+}
+
 export async function executarSoLeitura<T extends pg.QueryResultRow>(
   sql: string,
   parametros: unknown[] = [],
+  opcoes: OpcoesLeitura = {},
 ): Promise<pg.QueryResult<T>> {
   const clientePool = obterPool();
 
@@ -157,6 +171,18 @@ export async function executarSoLeitura<T extends pg.QueryResultRow>(
     // não é uma expressão, é uma diretiva. É seguro porque o valor não vem do
     // utilizador e é validado como inteiro em lerTimeoutDoAmbiente().
     await cliente.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
+
+    // Abre a exceção da política de RLS, se esta chamada a pediu. O LOCAL é o
+    // que a fecha outra vez: morre no COMMIT/ROLLBACK, antes de a ligação voltar
+    // ao pool. Um SET normal ficava colado à ligação e a próxima leitura que
+    // calhasse nela via arquivados sem os ter pedido — que é exatamente o bug
+    // silencioso que esta funcionalidade existe para não ter.
+    //
+    // O nome do parâmetro é uma constante deste código, nunca vem de fora, e o
+    // valor é um literal fixo. Vai interpolado porque um SET não aceita $1.
+    if (opcoes.incluirArquivados === true) {
+      await cliente.query(`SET LOCAL ${GUC_INCLUIR_ARQUIVADOS} = 'on'`);
+    }
 
     const resultado = await cliente.query<T>(sql, parametros);
 

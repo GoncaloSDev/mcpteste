@@ -15,6 +15,7 @@
 
 import pg from "pg";
 import { ErroValidacao } from "./erros.js";
+import { GUC_INCLUIR_ARQUIVADOS } from "./seguranca/arquivo.js";
 import { verificarLinhasAfetadas } from "./seguranca/escrita-camada3-linhas.js";
 
 const { Pool } = pg;
@@ -162,11 +163,25 @@ export function escritaLigada(): boolean {
  * @param operacao  "INSERT"/"UPDATE"/"DELETE", só para as mensagens de erro
  * @param alvo      descrição da linha visada, para as mensagens de erro
  */
+export interface OpcoesEscrita {
+  /**
+   * Deixar a instrução alcançar linhas ARQUIVADAS.
+   *
+   * As três tools do arquivo precisam disto, incluindo — contra a intuição — a
+   * que arquiva. O Postgres valida a linha NOVA de um UPDATE contra a política
+   * de SELECT, e a linha nova de um arquivar é, por construção, uma linha
+   * arquivada: sem o véu levantado a instrução é recusada com um 42501 a queixar-
+   * -se de uma linha que a própria instrução acabou de produzir.
+   */
+  incluirArquivados?: boolean;
+}
+
 export async function executarEscrita<T extends pg.QueryResultRow>(
   sql: string,
   parametros: unknown[],
   operacao: string,
   alvo: string,
+  opcoes: OpcoesEscrita = {},
 ): Promise<pg.QueryResult<T>> {
   const clientePool = obterPool();
   const cliente = await clientePool.connect();
@@ -181,6 +196,14 @@ export async function executarEscrita<T extends pg.QueryResultRow>(
     // O valor é interpolado porque um SET não aceita parâmetros; é seguro porque
     // vem validado como inteiro do lerTimeoutDoAmbiente().
     await cliente.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
+
+    // Ver a nota gémea no db.ts. O LOCAL faz a exceção morrer neste COMMIT, e
+    // isso importa ainda mais deste lado: uma exceção presa a uma ligação de
+    // ESCRITA deixaria um update seguinte alcançar linhas arquivadas que ninguém
+    // pediu para alcançar.
+    if (opcoes.incluirArquivados === true) {
+      await cliente.query(`SET LOCAL ${GUC_INCLUIR_ARQUIVADOS} = 'on'`);
+    }
 
     const resultado = await cliente.query<T>(sql, parametros);
 

@@ -10,6 +10,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { executarSoLeitura } from "../db.js";
 import { escritaLigada } from "../db-escrita.js";
+import { citarIdentificador } from "../identificadores.js";
+import { COLUNA_ARQUIVO } from "../seguranca/arquivo.js";
 import { TABELAS_ESCRITA } from "../seguranca/escrita-camada1-alvo.js";
 import { respostaErro, respostaOk } from "./resposta.js";
 
@@ -57,6 +59,58 @@ const SQL_TABELAS = `
    ORDER BY c.relname
 `;
 
+/**
+ * Quantas linhas cada tabela tem arquivadas.
+ *
+ * NUM SÓ ROUND TRIP, e daí o UNION ALL construído à mão: 19 contagens
+ * independentes seriam 19 idas e voltas ao Postgres numa tool que é, tipicamente,
+ * a primeira coisa que alguém chama. Cada contagem sozinha é barata (o índice
+ * parcial `WHERE arquivado_em IS NOT NULL` é minúsculo e responde por
+ * index-only scan); o que custava era a latência somada.
+ *
+ * Os nomes vêm do pg_class, ou seja do próprio Postgres, e ainda assim passam
+ * pelo citarIdentificador — a mesma regra do identificadores.ts: a construção tem
+ * de estar correta por si só, não por causa de quem a chama hoje.
+ *
+ * Corre com o véu do arquivo levantado, porque é a única forma de contar o que
+ * ele esconde.
+ */
+async function contarArquivadas(tabelas: readonly string[]): Promise<Map<string, number>> {
+  const contagens = new Map<string, number>();
+  if (tabelas.length === 0) {
+    return contagens;
+  }
+
+  const partes = tabelas.map(
+    (t) =>
+      `SELECT ${literalDeTexto(t)} AS tabela, count(*) AS n ` +
+      `FROM ${citarIdentificador(t)} WHERE ${citarIdentificador(COLUNA_ARQUIVO)} IS NOT NULL`,
+  );
+
+  const resultado = await executarSoLeitura<{ tabela: string; n: string }>(
+    partes.join(" UNION ALL "),
+    [],
+    { incluirArquivados: true },
+  );
+
+  for (const linha of resultado.rows) {
+    contagens.set(linha.tabela, Number(linha.n));
+  }
+  return contagens;
+}
+
+/**
+ * Um literal de texto em SQL, com o escape do padrão (plica -> duas plicas).
+ *
+ * Aqui não há alternativa parametrizada: o valor faz parte da lista de SELECT de
+ * cada ramo do UNION, e cada ramo teria de trazer o seu $n — o que daria uma
+ * query com 19 parâmetros construídos por índice, mais frágil de ler e de manter
+ * do que este escape de uma linha. O valor vem do catálogo do Postgres.
+ */
+function literalDeTexto(valor: string): string {
+  return `'${valor.replace(/'/g, "''")}'`;
+}
+
 export function registarListTables(server: McpServer): void {
   server.registerTool(
     "list_tables",
@@ -74,6 +128,9 @@ export function registarListTables(server: McpServer): void {
     async () => {
       try {
         const resultado = await executarSoLeitura<LinhaTabela>(SQL_TABELAS);
+        const arquivadasPorTabela = await contarArquivadas(
+          resultado.rows.map((linha) => linha.tabela),
+        );
 
         // A flag é calculada aqui, em TypeScript, e não na query: a fonte de
         // verdade da whitelist é o escrita-camada1-alvo.ts, e replicá-la no SQL
@@ -84,17 +141,26 @@ export function registarListTables(server: McpServer): void {
         const tabelas = resultado.rows.map((linha) => ({
           ...linha,
           escrivel: podeEscrever && TABELAS_ESCRITA.has(linha.tabela),
+          arquivadas: arquivadasPorTabela.get(linha.tabela) ?? 0,
         }));
+
+        const totalArquivadas = [...arquivadasPorTabela.values()].reduce((a, b) => a + b, 0);
 
         return respostaOk({
           total_tabelas: resultado.rowCount,
           modo_escrita: podeEscrever ? "ligado" : "desligado",
+          total_arquivadas: totalArquivadas,
+          nota_arquivo:
+            "linhas_aprox NÃO conta as linhas arquivadas — elas são invisíveis a este " +
+            "servidor. A coluna 'arquivadas' diz quantas cada tabela esconde. Para as ver, " +
+            "run_query com incluir_arquivados=true e um filtro por arquivado_em IS NOT NULL.",
           nota:
             "linhas_aprox vem das estatísticas do planeador do Postgres, não de um COUNT(*). " +
             "É rápido mas aproximado. NULL significa que a tabela ainda nunca foi analisada " +
             "pelo autovacuum — não que esteja vazia.",
           nota_escrita: podeEscrever
-            ? "escrivel=true indica as tabelas onde insert_row, update_row e delete_row " +
+            ? "escrivel=true indica as tabelas onde insert_row, update_row, archive_row, " +
+              "restore_row e delete_row " +
               "funcionam. As de movimento (documentos, linhas, stocks, conta corrente, " +
               "comissões) estão bloqueadas: os totais e saldos delas dependem uns dos outros " +
               "e a base não tem triggers que os mantenham coerentes."

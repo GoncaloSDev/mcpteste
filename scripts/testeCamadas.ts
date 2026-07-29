@@ -109,6 +109,32 @@ const CASOS: Caso[] = [
     deveAceitar: true,
     esperaConter: "LIMIT 200 acrescentado automaticamente",
   },
+  // O comando SET está bloqueado pelo VariableSetStmt desde sempre. Estes dois
+  // casos são o caminho POR BAIXO dele: a mesma capacidade, disponível como
+  // função, dentro de um SELECT sintaticamente impecável. O primeiro revelaria
+  // os registos arquivados; o segundo desligava o statement_timeout, que é a
+  // Camada 3.
+  {
+    numero: 13,
+    descricao: "set_config a revelar arquivados — um SELECT que muda o estado da sessão",
+    sql: "SELECT set_config('mcp.incluir_arquivados', 'on', false)",
+    deveAceitar: false,
+    esperaConter: "set_config",
+  },
+  {
+    numero: 14,
+    descricao: "set_config qualificado — o nome vem em duas partes na árvore",
+    sql: "SELECT pg_catalog.set_config('statement_timeout', '0', false)",
+    deveAceitar: false,
+    esperaConter: "set_config",
+  },
+  {
+    numero: 15,
+    descricao: "set_config escondido numa subquery — a varredura é recursiva",
+    sql: "SELECT nome FROM clientes WHERE nome = (SELECT set_config('mcp.incluir_arquivados','on',false))",
+    deveAceitar: false,
+    esperaConter: "set_config",
+  },
 ];
 
 async function main(): Promise<void> {

@@ -76,10 +76,12 @@ async function main(): Promise<void> {
 
   const primeira = (r: Resposta): string => r.texto.split("\n").find((l) => l.trim() !== "") ?? "";
 
-  // --- 0. As três tools estão mesmo registadas -------------------------------
+  // --- 0. As cinco tools estão mesmo registadas ------------------------------
   registar(
-    "as 3 tools de escrita estão registadas",
-    ["insert_row", "update_row", "delete_row"].every((t) => nomes.includes(t)),
+    "as 5 tools de escrita estão registadas",
+    ["insert_row", "update_row", "archive_row", "restore_row", "delete_row"].every((t) =>
+      nomes.includes(t),
+    ),
     `tools: ${nomes.join(", ")}`,
   );
 
@@ -93,8 +95,12 @@ async function main(): Promise<void> {
   );
 
   // --- 2. Limpeza preventiva -------------------------------------------------
-  // Se uma corrida anterior rebentou a meio, o cliente de teste pode ter ficado.
-  // O erro desta chamada é esperado e ignorado de propósito.
+  // Se uma corrida anterior rebentou a meio, o cliente de teste pode ter ficado —
+  // e pode ter ficado em qualquer um dos dois estados, ativo ou arquivado. Como
+  // apagar exige que esteja arquivado, arquiva-se primeiro (erro ignorado se já
+  // estiver) e só depois se apaga. Os erros das duas chamadas são esperados no
+  // caso normal, em que não sobrou nada.
+  await chamar("archive_row", { tabela: "clientes", chave: { no_cli: NO_CLI_TESTE } });
   await chamar("delete_row", {
     tabela: "clientes",
     chave: { no_cli: NO_CLI_TESTE },
@@ -227,9 +233,36 @@ async function main(): Promise<void> {
     confirmar: false,
   });
   registar(
-    "delete_row exige confirmar=true",
-    semConfirmar.erro && semConfirmar.texto.includes("confirmar=true"),
+    "delete_row sem confirmar não apaga: devolve pré-visualização",
+    !semConfirmar.erro &&
+      semConfirmar.texto.includes('"apagado": false') &&
+      semConfirmar.texto.includes("NADA FOI APAGADO"),
     primeira(semConfirmar),
+  );
+
+  // O pré-requisito que substitui a antiga rede das chaves estrangeiras.
+  const naoArquivado = await chamar("delete_row", {
+    tabela: "clientes",
+    chave: { no_cli: NO_CLI_TESTE },
+    confirmar: true,
+  });
+  registar(
+    "delete_row recusa apagar uma linha que não foi arquivada antes",
+    naoArquivado.erro && naoArquivado.texto.includes("não está arquivada"),
+    primeira(naoArquivado),
+  );
+
+  // A coluna do arquivo não é uma coluna como as outras: mexer-lhe por
+  // update_row daria a volta ao pré-requisito de cima numa só chamada.
+  const arquivoPorUpdate = await chamar("update_row", {
+    tabela: "clientes",
+    chave: { no_cli: NO_CLI_TESTE },
+    valores: { arquivado_em: null },
+  });
+  registar(
+    "update_row recusa escrever na coluna arquivado_em",
+    arquivoPorUpdate.erro && arquivoPorUpdate.texto.includes("não se altera por insert_row"),
+    primeira(arquivoPorUpdate),
   );
 
   const inexistente = await chamar("update_row", {
@@ -255,15 +288,23 @@ async function main(): Promise<void> {
     primeira(injecao),
   );
 
-  // A chave estrangeira é a defesa que permitiu abrir os dados mestre à escrita:
-  // um cliente com documentos não pode ser apagado, e não é preciso programar
-  // nada para isso — o schema já o declara.
+  // A CASCATA, medida sem ser disparada.
   //
-  // O cliente é DESCOBERTO e não escrito à mão. A primeira versão deste teste
+  // Antes do arquivo, este teste era outro: provava que a chave estrangeira
+  // TRAVAVA o apagar de um cliente com documentos. Deixou de ser verdade — todas
+  // as chaves estrangeiras desta base passaram a ON DELETE CASCADE, e apagar esse
+  // cliente apagaria com ele os documentos, as linhas, os movimentos de conta
+  // corrente e as comissões.
+  //
+  // O que se testa agora é a defesa que substituiu aquela: que a pré-visualização
+  // conta o estrago ANTES, e que nada acontece sem confirmação. É por isso que
+  // este teste usa um cliente REAL da base — o único sítio onde há uma cascata
+  // funda para medir — e o faz pelo caminho que garantidamente não lhe toca.
+  //
+  // O cliente é DESCOBERTO e não escrito à mão. A primeira versão do teste antigo
   // usava no_cli=1 e falhava, porque o seed numera os clientes a partir de 1001;
-  // o erro que dava era "nenhuma linha corresponde", ou seja o teste passava a
-  // testar outra coisa sem ninguém reparar. Perguntar à base custa uma query e
-  // sobrevive a uma mudança nos parâmetros do seed.
+  // o erro que dava era "nenhuma linha corresponde", ou seja passava a testar
+  // outra coisa sem ninguém reparar.
   const comHistorico = await chamar("run_query", {
     sql: "SELECT no_cli FROM docs_venda ORDER BY no_cli LIMIT 1",
   });
@@ -271,20 +312,38 @@ async function main(): Promise<void> {
 
   if (noCliComDocs === undefined) {
     registar(
-      "delete_row é travado por chave estrangeira num cliente com histórico",
+      "delete_row pré-visualiza a cascata de um cliente com histórico",
       false,
       "não foi possível encontrar um cliente com documentos — a base está povoada?",
     );
   } else {
-    const fkPresa = await chamar("delete_row", {
+    // confirmar em falta, de propósito: é o caminho que só lê.
+    const previsao = await chamar("delete_row", {
       tabela: "clientes",
       chave: { no_cli: Number(noCliComDocs) },
-      confirmar: true,
+    });
+    const arrastadas = Number(
+      /"linhas_que_seriam_arrastadas":\s*(\d+)/.exec(previsao.texto)?.[1] ?? "0",
+    );
+    registar(
+      "delete_row pré-visualiza a cascata de um cliente com histórico",
+      !previsao.erro &&
+        previsao.texto.includes('"apagado": false') &&
+        // Um cliente do seed tem documentos, linhas e movimentos de c/c: a
+        // cascata tem de contar bastante mais do que zero.
+        arrastadas > 0 &&
+        previsao.texto.includes("docs_venda"),
+      `cliente ${noCliComDocs} — ${arrastadas} linhas seriam arrastadas`,
+    );
+
+    // E continua lá, intacto: a pré-visualização não é um apagar disfarçado.
+    const intacto = await chamar("run_query", {
+      sql: `SELECT count(*) AS n FROM clientes WHERE no_cli = ${noCliComDocs}`,
     });
     registar(
-      "delete_row é travado por chave estrangeira num cliente com histórico",
-      fkPresa.erro && fkPresa.texto.includes("chave estrangeira"),
-      `cliente ${noCliComDocs} — ${primeira(fkPresa)}`,
+      "a pré-visualização não tocou no cliente real",
+      !intacto.erro && /"n":\s*"?1"?/.test(intacto.texto),
+      primeira(intacto),
     );
   }
 
@@ -310,9 +369,120 @@ async function main(): Promise<void> {
   );
 
   // =========================================================================
+  // O ARQUIVO — esconder, procurar, repor
+  // =========================================================================
+  console.log("--- arquivo ---\n");
+
+  const arquivar = await chamar("archive_row", {
+    tabela: "clientes",
+    chave: { no_cli: NO_CLI_TESTE },
+  });
+  registar(
+    "archive_row arquiva a linha e diz que é reversível",
+    !arquivar.erro &&
+      arquivar.texto.includes('"linhas_afetadas": 1') &&
+      arquivar.texto.includes('"reversivel": true'),
+    primeira(arquivar),
+  );
+
+  // O teste que interessa de todos: a linha continua na base, mas o run_query
+  // deixou de a ver. Quem a esconde é a política de RLS do Postgres — nenhuma
+  // linha deste projeto filtra coisa nenhuma.
+  const invisivel = await chamar("run_query", {
+    sql: `SELECT count(*) AS n FROM clientes WHERE no_cli = ${NO_CLI_TESTE}`,
+  });
+  registar(
+    "a linha arquivada desapareceu do run_query",
+    !invisivel.erro && /"n":\s*"?0"?/.test(invisivel.texto),
+    primeira(invisivel),
+  );
+
+  // E não é só na pesquisa direta: dentro de uma subquery também não aparece.
+  // É esta a propriedade que um filtro escrito nas tools não conseguiria garantir
+  // sem reescrever a árvore de cada select.
+  const invisivelSubquery = await chamar("run_query", {
+    sql:
+      "SELECT count(*) AS n FROM clientes WHERE no_cli IN " +
+      `(SELECT no_cli FROM clientes WHERE no_cli = ${NO_CLI_TESTE})`,
+  });
+  registar(
+    "nem dentro de uma subquery a linha arquivada aparece",
+    !invisivelSubquery.erro && /"n":\s*"?0"?/.test(invisivelSubquery.texto),
+    primeira(invisivelSubquery),
+  );
+
+  const comVeuLevantado = await chamar("run_query", {
+    sql: `SELECT no_cli, arquivado_em FROM clientes WHERE no_cli = ${NO_CLI_TESTE}`,
+    incluir_arquivados: true,
+  });
+  registar(
+    "com incluir_arquivados=true a linha volta a aparecer",
+    !comVeuLevantado.erro &&
+      comVeuLevantado.texto.includes('"linhas": 1') &&
+      comVeuLevantado.texto.includes("INCLUÍDOS"),
+    primeira(comVeuLevantado),
+  );
+
+  // O véu levantado numa chamada não pode ficar colado à ligação do pool: é o
+  // SET LOCAL que garante que morre no COMMIT. Sem isto, a leitura seguinte que
+  // calhasse na mesma ligação via arquivados sem os ter pedido.
+  const veuVoltouADescer = await chamar("run_query", {
+    sql: `SELECT count(*) AS n FROM clientes WHERE no_cli = ${NO_CLI_TESTE}`,
+  });
+  registar(
+    "o véu não fica colado à ligação do pool (SET LOCAL)",
+    !veuVoltouADescer.erro && /"n":\s*"?0"?/.test(veuVoltouADescer.texto),
+    primeira(veuVoltouADescer),
+  );
+
+  const arquivarOutraVez = await chamar("archive_row", {
+    tabela: "clientes",
+    chave: { no_cli: NO_CLI_TESTE },
+  });
+  registar(
+    "archive_row recusa arquivar o que já está arquivado",
+    arquivarOutraVez.erro && arquivarOutraVez.texto.includes("já estava arquivada"),
+    primeira(arquivarOutraVez),
+  );
+
+  const repor = await chamar("restore_row", {
+    tabela: "clientes",
+    chave: { no_cli: NO_CLI_TESTE },
+  });
+  registar(
+    "restore_row repõe a linha com os dados intactos",
+    !repor.erro &&
+      repor.texto.includes('"linhas_afetadas": 1') &&
+      repor.texto.includes("CLIENTE DE TESTE"),
+    primeira(repor),
+  );
+
+  const voltouAoAtivo = await chamar("run_query", {
+    sql: `SELECT count(*) AS n FROM clientes WHERE no_cli = ${NO_CLI_TESTE}`,
+  });
+  registar(
+    "a linha reposta volta a ser visível",
+    !voltouAoAtivo.erro && /"n":\s*"?1"?/.test(voltouAoAtivo.texto),
+    primeira(voltouAoAtivo),
+  );
+
+  const reporOutraVez = await chamar("restore_row", {
+    tabela: "clientes",
+    chave: { no_cli: NO_CLI_TESTE },
+  });
+  registar(
+    "restore_row recusa repor o que não está arquivado",
+    reporOutraVez.erro && reporOutraVez.texto.includes("não está arquivada"),
+    primeira(reporOutraVez),
+  );
+
+  // =========================================================================
   // LIMPEZA — e a verificação que conta
   // =========================================================================
   console.log("--- limpeza ---\n");
+
+  // Dois passos, agora obrigatoriamente: arquivar e só depois apagar.
+  await chamar("archive_row", { tabela: "clientes", chave: { no_cli: NO_CLI_TESTE } });
 
   const apagar = await chamar("delete_row", {
     tabela: "clientes",
@@ -320,18 +490,24 @@ async function main(): Promise<void> {
     confirmar: true,
   });
   registar(
-    "delete_row apaga a linha de teste e devolve-a",
+    "delete_row apaga a linha arquivada e devolve-a",
     !apagar.erro &&
       apagar.texto.includes('"linhas_afetadas": 1') &&
+      apagar.texto.includes('"apagado": true') &&
       apagar.texto.includes("CLIENTE DE TESTE"),
     primeira(apagar),
   );
 
+  // Com o véu LEVANTADO, e a diferença é toda: sem ele, esta contagem daria zero
+  // tanto se a linha tivesse sido apagada como se tivesse ficado apenas
+  // arquivada. Seria uma verificação que passava nos dois casos, e um teste que
+  // não distingue sucesso de falha não está a verificar nada.
   const sobrou = await chamar("run_query", {
     sql: `SELECT count(*) AS n FROM clientes WHERE no_cli = ${NO_CLI_TESTE}`,
+    incluir_arquivados: true,
   });
   registar(
-    "a base ficou como estava (o cliente de teste já não existe)",
+    "a base ficou como estava (nem ativo nem arquivado)",
     !sobrou.erro && /"n":\s*"?0"?/.test(sobrou.texto),
     primeira(sobrou),
   );

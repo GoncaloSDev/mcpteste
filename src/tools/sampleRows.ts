@@ -37,9 +37,16 @@ export function registarSampleRows(server: McpServer): void {
           .max(LINHAS_MAXIMO, `O máximo são ${LINHAS_MAXIMO} linhas.`)
           .default(LINHAS_OMISSAO)
           .describe(`Quantas linhas devolver (1 a ${LINHAS_MAXIMO}, por omissão ${LINHAS_OMISSAO}).`),
+        incluir_arquivados: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Por omissão false: os registos arquivados não entram na amostra. Põe true para " +
+              "os incluir (a coluna arquivado_em distingue-os; NULL = ativo).",
+          ),
       },
     },
-    async ({ tabela, linhas }) => {
+    async ({ tabela, linhas, incluir_arquivados }) => {
       try {
         // Ver o comentário grande em identificadores.ts: o `tabela` que veio do
         // utilizador é usado só como VALOR numa query parametrizada ao catálogo.
@@ -59,6 +66,7 @@ export function registarSampleRows(server: McpServer): void {
         const resultado = await executarSoLeitura(
           `SELECT * FROM ${nomeCitado} LIMIT $1`,
           [linhas],
+          { incluirArquivados: incluir_arquivados },
         );
 
         return respostaOk({
@@ -66,6 +74,7 @@ export function registarSampleRows(server: McpServer): void {
           linhas_pedidas: linhas,
           linhas_devolvidas: resultado.rowCount,
           colunas: resultado.fields.map((campo) => campo.name),
+          arquivados: incluir_arquivados ? "incluídos" : "excluídos (comportamento normal)",
           nota: "Amostra sem ordenação definida — não são necessariamente as 'primeiras' linhas.",
           dados: resultado.rows,
         });

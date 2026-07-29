@@ -20,6 +20,7 @@
 
 import { executarSoLeitura } from "../db.js";
 import { ErroValidacao } from "../erros.js";
+import { recusarEscritaDiretaNoArquivo } from "./arquivo.js";
 
 /**
  * As tabelas onde escrever é permitido: os dados mestre, 12 das 19.
@@ -197,6 +198,13 @@ export function validarValores(
         `Usa a tool describe_table para veres as colunas reais.`,
     );
   }
+
+  // A coluna do arquivo existe em todas as tabelas e é uma coluna normal — sem
+  // isto, o insert_row e o update_row escreviam nela como escrevem em qualquer
+  // outra, e as tools do arquivo passavam a ser uma sugestão em vez de o caminho.
+  // O pré-requisito do delete_row ("tem de estar arquivada") deixava de
+  // significar seja o que for, porque um update genérico o satisfazia.
+  recusarEscritaDiretaNoArquivo(nomes);
 
   if (!permitirChave) {
     // PORQUÊ RECUSAR MUDAR A CHAVE PRIMÁRIA NUM UPDATE:

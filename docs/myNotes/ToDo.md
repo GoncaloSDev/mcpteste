@@ -1,11 +1,11 @@
 
 # URGENTES
+- Melhorar os prompts das tools CRUDA
+  
+
+# Desktop fora do localhost
 
 
 
 # NÃO URGENTE
-
-## Prever as seguintes tools:
-- Queries só consultas (R)
-- Queries para operações (CUD)
 

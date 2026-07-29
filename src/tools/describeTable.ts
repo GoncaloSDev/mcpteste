@@ -10,7 +10,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { executarSoLeitura } from "../db.js";
-import { resolverTabela } from "../identificadores.js";
+import { citarIdentificador, resolverTabela } from "../identificadores.js";
+import { COLUNA_ARQUIVO } from "../seguranca/arquivo.js";
 import { respostaErro, respostaOk } from "./resposta.js";
 
 interface LinhaColuna {
@@ -25,7 +26,25 @@ interface LinhaChave {
   coluna: string;
   tabela_referida: string | null;
   coluna_referida: string | null;
+  accao_apagar: string | null;
 }
+
+/**
+ * O que o Postgres faz à linha FILHA quando a pai é apagada. Vem do
+ * pg_constraint.confdeltype, que é uma letra só.
+ *
+ * Nesta base são todas 'c'. Traduzi-las na resposta não é decoração: é a
+ * diferença entre "apagar este cliente apaga os documentos dele" e "apagar este
+ * cliente é recusado enquanto tiver documentos", e quem estiver a decidir se
+ * apaga alguma coisa precisa de saber em qual dos dois mundos está.
+ */
+const ACCOES_APAGAR: Readonly<Record<string, string>> = {
+  a: "NO ACTION (o apagar é recusado se houver linhas a apontar)",
+  r: "RESTRICT (o apagar é recusado se houver linhas a apontar)",
+  c: "CASCADE (apagar a linha referida APAGA TAMBÉM esta)",
+  n: "SET NULL (esta coluna fica a NULL)",
+  d: "SET DEFAULT (esta coluna volta ao valor por omissão)",
+};
 
 /**
  * Aqui não é preciso concatenar o nome da tabela no SQL: o information_schema
@@ -67,7 +86,8 @@ const SQL_CHAVES = `
   SELECT con.contype                                       AS tipo,
          att.attname                                       AS coluna,
          cref.relname                                      AS tabela_referida,
-         attref.attname                                    AS coluna_referida
+         attref.attname                                    AS coluna_referida,
+         con.confdeltype                                   AS accao_apagar
     FROM pg_constraint con
     JOIN pg_class c     ON c.oid = con.conrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -123,13 +143,34 @@ export function registarDescribeTable(server: McpServer): void {
           .map((l) => ({
             coluna: l.coluna,
             referencia: `${l.tabela_referida}.${l.coluna_referida}`,
+            ao_apagar_o_referido:
+              ACCOES_APAGAR[l.accao_apagar ?? ""] ?? `desconhecido (${l.accao_apagar})`,
           }));
+
+        // Quantas linhas desta tabela estão arquivadas. Corre com o véu levantado
+        // — com ele em baixo a resposta seria sempre zero, que é exatamente o
+        // ponto do arquivo e exatamente o que aqui não serve.
+        const arquivadas = await executarSoLeitura<{ n: string }>(
+          `SELECT count(*) AS n FROM ${citarIdentificador(nome)} ` +
+            `WHERE ${citarIdentificador(COLUNA_ARQUIVO)} IS NOT NULL`,
+          [],
+          { incluirArquivados: true },
+        );
+        const totalArquivadas = Number(arquivadas.rows[0]?.n ?? 0);
 
         return respostaOk({
           tabela: nome,
           total_colunas: colunas.rowCount,
           chave_primaria: chavePrimaria.length > 0 ? chavePrimaria : null,
           chaves_estrangeiras: chavesEstrangeiras.length > 0 ? chavesEstrangeiras : null,
+          linhas_arquivadas: totalArquivadas,
+          nota_arquivo:
+            `A coluna ${COLUNA_ARQUIVO} marca o arquivo (NULL = ativo). As linhas arquivadas ` +
+            "não aparecem em consulta nenhuma a não ser com incluir_arquivados=true, e não se " +
+            `alteram por update_row — só por archive_row e restore_row.` +
+            (totalArquivadas > 0
+              ? ` Esta tabela tem ${totalArquivadas} linha(s) arquivada(s) que não estás a ver.`
+              : ""),
           colunas: colunas.rows,
         });
       } catch (erro) {

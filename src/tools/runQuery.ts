@@ -32,9 +32,18 @@ export function registarRunQuery(server: McpServer): void {
           .describe(
             "A query SELECT a executar. Uma única instrução, sem ponto e vírgula a separar várias.",
           ),
+        incluir_arquivados: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Por omissão false: os registos arquivados não aparecem em consulta nenhuma. " +
+              "Põe true para os incluir — é a única forma de ver o que está arquivado e de " +
+              "descobrir a chave de uma linha a repor com restore_row. A coluna arquivado_em " +
+              "diz quando cada um foi arquivado (NULL = ativo), e pode ser usada no WHERE.",
+          ),
       },
     },
-    async ({ sql }) => {
+    async ({ sql, incluir_arquivados }) => {
       try {
         // --- CAMADA 1 -------------------------------------------------------
         // Puramente sintática, decidida sem tocar na base de dados. É a primeira
@@ -56,12 +65,23 @@ export function registarRunQuery(server: McpServer): void {
         // A transação READ ONLY e o statement_timeout vivem dentro do
         // executarSoLeitura. Mesmo que as camadas 1 e 3 tivessem falhado as
         // duas, o Postgres continuaria a recusar qualquer escrita aqui.
-        const resultado = await executarSoLeitura(limitada.sql);
+        // O véu do arquivo, quando pedido, é levantado por um SET LOCAL dentro
+        // desta transação — e cai com ela. Repare-se no que NÃO acontece aqui: o
+        // `sql` não é tocado. O filtro dos arquivados é uma política de RLS do
+        // Postgres, não uma cláusula que este servidor acrescente; ligá-lo ou
+        // desligá-lo não muda uma vírgula da query que o utilizador escreveu.
+        const resultado = await executarSoLeitura(limitada.sql, [], {
+          incluirArquivados: incluir_arquivados,
+        });
 
         return respostaOk({
           linhas: resultado.rowCount,
           limite_aplicado: limitada.nota,
           timeout_ms: timeoutEmVigor(),
+          arquivados: incluir_arquivados
+            ? "INCLUÍDOS — os resultados podem trazer linhas arquivadas. A coluna " +
+              "arquivado_em distingue-as (NULL = ativa)."
+            : "excluídos (comportamento normal)",
           // Devolver o SQL efetivamente executado é uma questão de honestidade:
           // se o servidor alterou a query, quem a escreveu tem de o conseguir
           // ver, para perceber porque é que o resultado tem as linhas que tem.
