@@ -25,7 +25,7 @@
  * e só com confirmar=true). O que isto impede é apagar sem saber o que se apagou.
  */
 
-import { executarSoLeitura } from "../db.js";
+import type { ContextoLeitura } from "../acesso/contexto.js";
 import { citarIdentificador } from "../identificadores.js";
 
 /** O que uma tabela dependente perde quando a linha visada for apagada. */
@@ -106,18 +106,20 @@ const SQL_DEPENDENTES = `
  * realidade — que é o pior erro possível numa contagem cujo propósito é avisar.
  */
 export async function calcularImpactoCascata(
+  contexto: ContextoLeitura,
   tabela: string,
   condicao: string,
   parametros: readonly unknown[],
 ): Promise<ImpactoTabela[]> {
   const impacto: ImpactoTabela[] = [];
-  await percorrer(tabela, condicao, parametros, 1, new Set([tabela]), impacto);
+  await percorrer(contexto, tabela, condicao, parametros, 1, new Set([tabela]), impacto);
   // Da mais atingida para a menos: numa lista longa, o que interessa ver
   // primeiro é o maior estrago.
   return impacto.sort((a, b) => b.linhas - a.linhas);
 }
 
 async function percorrer(
+  contexto: ContextoLeitura,
   tabela: string,
   condicao: string,
   parametros: readonly unknown[],
@@ -129,7 +131,7 @@ async function percorrer(
     return;
   }
 
-  const dependentes = await executarSoLeitura<FkEntrada>(SQL_DEPENDENTES, [tabela]);
+  const dependentes = await contexto.executarLeitura<FkEntrada>(SQL_DEPENDENTES, [tabela]);
 
   for (const fk of dependentes.rows) {
     // Só o CASCADE arrasta linhas. Uma FK RESTRICT faz o Postgres recusar o
@@ -158,7 +160,7 @@ async function percorrer(
       `SELECT ${citarIdentificador(fk.coluna_destino)} FROM ${citarIdentificador(tabela)} ` +
       `WHERE ${condicao})`;
 
-    const contagem = await executarSoLeitura<{ n: string }>(
+    const contagem = await contexto.executarLeitura<{ n: string }>(
       `SELECT count(*) AS n FROM ${citarIdentificador(fk.tabela_origem)} WHERE ${condicaoFilha}`,
       [...parametros],
       { incluirArquivados: true },
@@ -183,6 +185,7 @@ async function percorrer(
     // chega-se por artfam e por artsubfam, por exemplo).
     visitadas.add(fk.tabela_origem);
     await percorrer(
+      contexto,
       fk.tabela_origem,
       condicaoFilha,
       parametros,

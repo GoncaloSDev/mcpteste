@@ -63,13 +63,13 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Hono } from "hono";
 
+import type { ContextoAcesso } from "./acesso/contexto.js";
 import { log, mensagemDoErro } from "./log.js";
 import {
   arrancarDependencias,
   criarServidor,
   falharNoArranque,
   registarEncerramento,
-  type EstadoArranque,
 } from "./servidor.js";
 
 /** O caminho do endpoint MCP. Um só, como manda a especificação do transporte. */
@@ -103,7 +103,7 @@ function erroJsonRpc(codigo: number, mensagem: string) {
  * com o sessionIdGenerator, o devolve no cabeçalho Mcp-Session-Id da resposta ao
  * initialize e o exige em todos os pedidos seguintes.
  */
-async function abrirSessao(estado: EstadoArranque): Promise<StreamableHTTPServerTransport> {
+async function abrirSessao(contexto: ContextoAcesso): Promise<StreamableHTTPServerTransport> {
   // A anotação de tipo explícita não é decorativa: os callbacks abaixo referem
   // `transporte` dentro do seu próprio inicializador, e sem ela o TypeScript não
   // consegue inferir o tipo (referência circular). Em execução não há problema
@@ -139,7 +139,7 @@ async function abrirSessao(estado: EstadoArranque): Promise<StreamableHTTPServer
     }
   };
 
-  const servidor = criarServidor(estado);
+  const servidor = criarServidor(contexto);
   await servidor.connect(transporte);
   return transporte;
 }
@@ -177,7 +177,7 @@ async function entregarAoTransporte(
   }
 }
 
-function criarApp(estado: EstadoArranque): Hono<{ Bindings: HttpBindings }> {
+function criarApp(contexto: ContextoAcesso): Hono<{ Bindings: HttpBindings }> {
   const app = new Hono<{ Bindings: HttpBindings }>();
 
   /**
@@ -235,7 +235,7 @@ function criarApp(estado: EstadoArranque): Hono<{ Bindings: HttpBindings }> {
           400,
         );
       }
-      transporte = await abrirSessao(estado);
+      transporte = await abrirSessao(contexto);
     }
 
     await entregarAoTransporte(transporte, c.env, corpo);
@@ -329,7 +329,7 @@ async function main(): Promise<void> {
   //
   // Igual ao stdio, e de propósito: um servidor que abre o porto HTTP antes de
   // saber se tem base de dados só dá o erro ao primeiro cliente que se ligar.
-  const estado = await arrancarDependencias();
+  const contexto = await arrancarDependencias();
 
   // --- 2. O endpoint ---------------------------------------------------------
 
@@ -339,7 +339,7 @@ async function main(): Promise<void> {
   // à rede local por distração. Pôr 0.0.0.0 aqui tem de ser um ato deliberado.
   const anfitriao = process.env["MCP_HTTP_HOST"] ?? "127.0.0.1";
 
-  const app = criarApp(estado);
+  const app = criarApp(contexto);
   const servidorHttp: ServerType = serve({ fetch: app.fetch, port: porta, hostname: anfitriao }, () => {
     log(`servidor pronto, à escuta em http://${anfitriao}:${porta}${CAMINHO_MCP} (Streamable HTTP).`);
   });

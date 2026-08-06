@@ -9,7 +9,7 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { executarEscrita } from "../db-escrita.js";
+import type { ContextoEscrita } from "../acesso/contexto.js";
 import { ErroValidacao } from "../erros.js";
 import { citarIdentificador } from "../identificadores.js";
 import {
@@ -20,7 +20,7 @@ import {
 import { esquemaValores } from "./escritaComum.js";
 import { respostaErro, respostaOk } from "./resposta.js";
 
-export function registarInsertRow(server: McpServer): void {
+export function registarInsertRow(server: McpServer, contexto: ContextoEscrita): void {
   server.registerTool(
     "insert_row",
     {
@@ -52,7 +52,7 @@ export function registarInsertRow(server: McpServer): void {
     },
     async ({ tabela, valores }) => {
       try {
-        const alvo = await resolverAlvoEscrita(tabela);
+        const alvo = await resolverAlvoEscrita(contexto, tabela);
 
         // permitirChave = true: ao contrário do UPDATE, aqui a chave primária TEM
         // de vir. Não há sequências nem colunas identity nesta base — todas as
@@ -85,7 +85,7 @@ export function registarInsertRow(server: McpServer): void {
           `INSERT INTO ${citarIdentificador(alvo.tabela)} (${listaColunas}) ` +
           `VALUES (${marcadores}) RETURNING *`;
 
-        const resultado = await executarEscrita(
+        const resultado = await contexto.executarEscrita(
           sql,
           parametros,
           "INSERT",

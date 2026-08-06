@@ -20,7 +20,7 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { executarEscrita } from "../db-escrita.js";
+import type { ContextoEscrita } from "../acesso/contexto.js";
 import { ErroValidacao } from "../erros.js";
 import { citarIdentificador } from "../identificadores.js";
 import { COLUNA_ARQUIVO, erroNaoExiste, lerEstadoArquivo } from "../seguranca/arquivo.js";
@@ -32,7 +32,7 @@ import {
 import { construirAtribuicoes, descreverChave, esquemaValores } from "./escritaComum.js";
 import { respostaErro, respostaOk } from "./resposta.js";
 
-export function registarRestoreRow(server: McpServer): void {
+export function registarRestoreRow(server: McpServer, contexto: ContextoEscrita): void {
   server.registerTool(
     "restore_row",
     {
@@ -61,7 +61,7 @@ export function registarRestoreRow(server: McpServer): void {
     },
     async ({ tabela, chave }) => {
       try {
-        const alvo = await resolverAlvoEscrita(tabela);
+        const alvo = await resolverAlvoEscrita(contexto, tabela);
         const chaveTipada = chave as Record<string, ValorColuna>;
         const colunasChave = validarChavePrimaria(alvo, chaveTipada);
 
@@ -69,6 +69,7 @@ export function registarRestoreRow(server: McpServer): void {
         const descricaoChave = descreverChave(chaveTipada);
 
         const estado = await lerEstadoArquivo(
+          contexto,
           alvo.tabela,
           condicoes.fragmentos,
           condicoes.parametros,
@@ -89,7 +90,7 @@ export function registarRestoreRow(server: McpServer): void {
           `SET ${citarIdentificador(COLUNA_ARQUIVO)} = NULL ` +
           `WHERE ${condicoes.fragmentos.join(" AND ")} RETURNING *`;
 
-        const resultado = await executarEscrita(
+        const resultado = await contexto.executarEscrita(
           sql,
           condicoes.parametros,
           "UPDATE",

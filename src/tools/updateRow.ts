@@ -9,7 +9,7 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { executarEscrita } from "../db-escrita.js";
+import type { ContextoEscrita } from "../acesso/contexto.js";
 import { citarIdentificador } from "../identificadores.js";
 import {
   resolverAlvoEscrita,
@@ -20,7 +20,7 @@ import {
 import { construirAtribuicoes, descreverChave, esquemaValores } from "./escritaComum.js";
 import { respostaErro, respostaOk } from "./resposta.js";
 
-export function registarUpdateRow(server: McpServer): void {
+export function registarUpdateRow(server: McpServer, contexto: ContextoEscrita): void {
   server.registerTool(
     "update_row",
     {
@@ -57,7 +57,7 @@ export function registarUpdateRow(server: McpServer): void {
     },
     async ({ tabela, chave, valores }) => {
       try {
-        const alvo = await resolverAlvoEscrita(tabela);
+        const alvo = await resolverAlvoEscrita(contexto, tabela);
 
         const chaveTipada = chave as Record<string, ValorColuna>;
         const valoresTipados = valores as Record<string, ValorColuna>;
@@ -84,7 +84,7 @@ export function registarUpdateRow(server: McpServer): void {
 
         const descricaoChave = descreverChave(chaveTipada);
 
-        const resultado = await executarEscrita(
+        const resultado = await contexto.executarEscrita(
           sql,
           [...atribuicoes.parametros, ...condicoes.parametros],
           "UPDATE",

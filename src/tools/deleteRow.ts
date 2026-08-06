@@ -34,7 +34,7 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { executarEscrita } from "../db-escrita.js";
+import type { ContextoEscrita } from "../acesso/contexto.js";
 import { citarIdentificador } from "../identificadores.js";
 import { erroNaoArquivado, erroNaoExiste, lerEstadoArquivo } from "../seguranca/arquivo.js";
 import { calcularImpactoCascata, totalDeLinhas } from "../seguranca/cascata.js";
@@ -46,7 +46,7 @@ import {
 import { construirAtribuicoes, descreverChave, esquemaValores } from "./escritaComum.js";
 import { respostaErro, respostaOk } from "./resposta.js";
 
-export function registarDeleteRow(server: McpServer): void {
+export function registarDeleteRow(server: McpServer, contexto: ContextoEscrita): void {
   server.registerTool(
     "delete_row",
     {
@@ -85,7 +85,7 @@ export function registarDeleteRow(server: McpServer): void {
     },
     async ({ tabela, chave, confirmar }) => {
       try {
-        const alvo = await resolverAlvoEscrita(tabela);
+        const alvo = await resolverAlvoEscrita(contexto, tabela);
         const chaveTipada = chave as Record<string, ValorColuna>;
         const colunasChave = validarChavePrimaria(alvo, chaveTipada);
 
@@ -93,6 +93,7 @@ export function registarDeleteRow(server: McpServer): void {
         const descricaoChave = descreverChave(chaveTipada);
 
         const estado = await lerEstadoArquivo(
+          contexto,
           alvo.tabela,
           condicoes.fragmentos,
           condicoes.parametros,
@@ -106,6 +107,7 @@ export function registarDeleteRow(server: McpServer): void {
         // predicado é o mesmo do WHERE, portanto a contagem descreve exatamente o
         // conjunto que vai desaparecer.
         const impacto = await calcularImpactoCascata(
+          contexto,
           alvo.tabela,
           condicoes.fragmentos.join(" AND "),
           condicoes.parametros,
@@ -150,7 +152,7 @@ export function registarDeleteRow(server: McpServer): void {
           `DELETE FROM ${citarIdentificador(alvo.tabela)} ` +
           `WHERE ${condicoes.fragmentos.join(" AND ")} RETURNING *`;
 
-        const resultado = await executarEscrita(
+        const resultado = await contexto.executarEscrita(
           sql,
           condicoes.parametros,
           "DELETE",

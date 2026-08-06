@@ -8,26 +8,49 @@
  */
 
 import pg from "pg";
-import { ErroValidacao } from "./erros.js";
 import { GUC_INCLUIR_ARQUIVADOS } from "./seguranca/arquivo.js";
 
 const { Pool } = pg;
 
 /**
- * O pool é criado uma vez e reutilizado. Fica em módulo (e não numa classe)
- * porque um servidor MCP por stdio é um processo com um cliente só — não há
- * cenário em que precisemos de dois pools.
+ * Uma ligação de leitura já aberta: o pool e o timeout que lhe pertence.
+ *
+ * ISTO ERA UMA VARIÁVEL DE MÓDULO. Deixou de o ser quando o mesmo processo
+ * passou a servir vários papéis: com um pool global, a pergunta "com que
+ * utilizador do Postgres corre esta query?" tinha uma resposta só por processo, e
+ * agora tem de ter uma resposta por chamada. O objeto é passado ao
+ * `executarSoLeitura` em vez de ser lido daqui.
+ *
+ * O que não mudou: continua a haver um pool por connection string, criado uma vez
+ * no arranque. Perfis que partilhem a mesma ligação partilham o pool.
  */
-let pool: pg.Pool | null = null;
+export interface LigacaoLeitura {
+  readonly pool: pg.Pool;
+  /** Timeout por query, em milissegundos. */
+  readonly timeoutMs: number;
+}
 
-/** Timeout por query, em milissegundos. Lido do ambiente no arranque. */
-let timeoutMs = 5000;
+/**
+ * Os pools abertos, para o encerramento os poder fechar todos.
+ *
+ * Continua a ser estado de módulo, mas de natureza diferente do que aqui estava
+ * antes: é um registo de CICLO DE VIDA, que só o arranque escreve e só o
+ * encerramento lê. Nenhuma tool lhe toca, e nada nele decide por onde uma query
+ * sai — que era o problema do pool global.
+ */
+const poolsAbertos = new Set<pg.Pool>();
 
 /** Informação recolhida no arranque, para o log e para a tool de diagnóstico. */
 export interface IdentidadeLigacao {
   utilizador: string;
   baseDeDados: string;
   versaoPostgres: string;
+}
+
+/** O que o arranque devolve: a ligação a usar e com quem ficámos ligados. */
+export interface LeituraArrancada {
+  ligacao: LigacaoLeitura;
+  identidade: IdentidadeLigacao;
 }
 
 /**
@@ -39,7 +62,7 @@ export interface IdentidadeLigacao {
  * aí o erro aparece ao utilizador no meio de uma conversa em vez de aparecer no
  * arranque, onde é fácil de ver.
  */
-export async function arrancarBaseDeDados(): Promise<IdentidadeLigacao> {
+export async function arrancarBaseDeDados(): Promise<LeituraArrancada> {
   // A variável é lida AQUI DENTRO, e não no corpo do módulo, de propósito: em
   // ESM os imports são todos avaliados antes de correr a primeira linha do
   // index.ts. Se isto estivesse no topo do ficheiro, corria antes de o
@@ -54,9 +77,9 @@ export async function arrancarBaseDeDados(): Promise<IdentidadeLigacao> {
     );
   }
 
-  timeoutMs = lerTimeoutDoAmbiente();
+  const timeoutMs = lerTimeoutDoAmbiente();
 
-  pool = new Pool({
+  const pool = new Pool({
     connectionString,
     // Um servidor MCP por stdio serve um cliente de cada vez e as chamadas
     // chegam praticamente em série. 4 ligações chegam de sobra e evitam ocupar
@@ -83,6 +106,8 @@ export async function arrancarBaseDeDados(): Promise<IdentidadeLigacao> {
     console.error("[db] erro numa ligação inativa do pool:", erro.message);
   });
 
+  poolsAbertos.add(pool);
+
   // A verificação de arranque propriamente dita. Se as credenciais estiverem
   // erradas ou o container estiver em baixo, rebenta aqui.
   const resultado = await pool.query<{
@@ -97,11 +122,15 @@ export async function arrancarBaseDeDados(): Promise<IdentidadeLigacao> {
   }
 
   return {
-    utilizador: linha.utilizador,
-    baseDeDados: linha.base,
-    // O version() completo é uma linha enorme com o compilador e a arquitetura.
-    // Para o log só interessam as duas primeiras palavras ("PostgreSQL 18.0").
-    versaoPostgres: linha.versao.split(" ").slice(0, 2).join(" "),
+    ligacao: { pool, timeoutMs },
+    identidade: {
+      utilizador: linha.utilizador,
+      baseDeDados: linha.base,
+      // O version() completo é uma linha enorme com o compilador e a
+      // arquitetura. Para o log só interessam as duas primeiras palavras
+      // ("PostgreSQL 18.0").
+      versaoPostgres: linha.versao.split(" ").slice(0, 2).join(" "),
+    },
   };
 }
 
@@ -141,11 +170,12 @@ export interface OpcoesLeitura {
 }
 
 export async function executarSoLeitura<T extends pg.QueryResultRow>(
+  ligacao: LigacaoLeitura,
   sql: string,
   parametros: unknown[] = [],
   opcoes: OpcoesLeitura = {},
 ): Promise<pg.QueryResult<T>> {
-  const clientePool = obterPool();
+  const clientePool = ligacao.pool;
 
   // pool.connect() tira uma ligação DEDICADA do pool. É obrigatório para uma
   // transação: com pool.query() cada comando podia sair por uma ligação
@@ -170,7 +200,7 @@ export async function executarSoLeitura<T extends pg.QueryResultRow>(
     // O valor vai interpolado porque um comando SET não aceita parâmetros ($1) —
     // não é uma expressão, é uma diretiva. É seguro porque o valor não vem do
     // utilizador e é validado como inteiro em lerTimeoutDoAmbiente().
-    await cliente.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
+    await cliente.query(`SET LOCAL statement_timeout = ${ligacao.timeoutMs}`);
 
     // Abre a exceção da política de RLS, se esta chamada a pediu. O LOCAL é o
     // que a fecha outra vez: morre no COMMIT/ROLLBACK, antes de a ligação voltar
@@ -202,21 +232,11 @@ export async function executarSoLeitura<T extends pg.QueryResultRow>(
   }
 }
 
-/** Fecha o pool de forma ordeira. Chamado no encerramento do servidor. */
+/** Fecha os pools de leitura de forma ordeira. Chamado no encerramento. */
 export async function fecharBaseDeDados(): Promise<void> {
-  if (pool !== null) {
-    await pool.end();
-    pool = null;
-  }
-}
-
-function obterPool(): pg.Pool {
-  if (pool === null) {
-    // Só acontece se alguém chamar uma tool antes do arranque — seria um bug
-    // nosso, não um erro do utilizador.
-    throw new ErroValidacao("O servidor ainda não está ligado à base de dados.");
-  }
-  return pool;
+  const pools = [...poolsAbertos];
+  poolsAbertos.clear();
+  await Promise.all(pools.map((p) => p.end()));
 }
 
 function lerTimeoutDoAmbiente(): number {
@@ -231,9 +251,4 @@ function lerTimeoutDoAmbiente(): number {
     return 5000;
   }
   return numero;
-}
-
-/** O timeout em vigor, para as tools o poderem mencionar nas suas respostas. */
-export function timeoutEmVigor(): number {
-  return timeoutMs;
 }

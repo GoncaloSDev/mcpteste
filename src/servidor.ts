@@ -16,6 +16,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { loadModule } from "libpg-query";
 
+import {
+  criarContextoEscrita,
+  criarContextoLeitura,
+  temEscrita,
+  type ContextoAcesso,
+} from "./acesso/contexto.js";
 import { arrancarBaseDeDados, fecharBaseDeDados } from "./db.js";
 import { arrancarEscrita, fecharEscrita } from "./db-escrita.js";
 import { log, mensagemDoErro } from "./log.js";
@@ -31,18 +37,6 @@ import { registarSampleRows } from "./tools/sampleRows.js";
 import { registarUpdateRow } from "./tools/updateRow.js";
 
 /**
- * O que o arranque apurou e de que a construção do servidor precisa.
- *
- * Um booleano só, e é tudo o que deve ser. Os pools de ligação NÃO passam por
- * aqui: vivem em variáveis de módulo no db.ts e no db-escrita.ts, criados uma
- * vez no arranque do processo. Quem constrói um McpServer não recebe ligações
- * nem as pode fechar — só precisa de saber se as tools de escrita entram ou não.
- */
-export interface EstadoArranque {
-  escritaLigada: boolean;
-}
-
-/**
  * Passo 1 do arranque: dependências externas, antes de tudo o resto.
  *
  * Corre UMA VEZ por processo, em qualquer dos modos. É aqui que se abrem os
@@ -52,7 +46,7 @@ export interface EstadoArranque {
  *
  * Falha com exceção — nunca devolve um servidor "meio vivo".
  */
-export async function arrancarDependencias(): Promise<EstadoArranque> {
+export async function arrancarDependencias(): Promise<ContextoAcesso> {
   // O libpg-query é WebAssembly, e o módulo WASM tem de ser carregado antes de
   // se poder chamar o parseSync(). É assíncrono, e é a razão de ser feito aqui:
   // fazendo-o uma vez no arranque, a Camada 1 fica a ser uma função SÍNCRONA
@@ -64,7 +58,7 @@ export async function arrancarDependencias(): Promise<EstadoArranque> {
   // Falha aqui se a variável não existir ou a base não responder. É deliberado:
   // um servidor que arranca sem base de dados só dá o erro na primeira tool
   // chamada, e aí aparece a meio de uma conversa em vez de aparecer no arranque.
-  const identidade = await arrancarBaseDeDados();
+  const { ligacao: ligacaoLeitura, identidade } = await arrancarBaseDeDados();
 
   // A verificação mais barata que existe de que não estamos, por engano, a usar
   // a connection string de admin. Se aqui aparecer "admin_dist" em vez de
@@ -92,10 +86,11 @@ export async function arrancarDependencias(): Promise<EstadoArranque> {
   const escrita = await arrancarEscrita();
 
   if (escrita !== null) {
-    log(`ESCRITA LIGADA — current_user = ${escrita.utilizador}`);
+    log(`ESCRITA LIGADA — current_user = ${escrita.identidade.utilizador}`);
     log(
-      `o Postgres concede INSERT a este utilizador em ${escrita.tabelasComEscrita.length} tabelas: ` +
-        `${escrita.tabelasComEscrita.join(", ")}`,
+      `o Postgres concede INSERT a este utilizador em ` +
+        `${escrita.identidade.tabelasComEscrita.length} tabelas: ` +
+        `${escrita.identidade.tabelasComEscrita.join(", ")}`,
     );
 
     // Confronto entre as duas listas independentes: a whitelist deste servidor e
@@ -104,7 +99,9 @@ export async function arrancarDependencias(): Promise<EstadoArranque> {
     // aparece no arranque, em vez de aparecer numa escrita que passou onde não
     // devia. Só se avisa quando o Postgres é MAIS PERMISSIVO do que a whitelist;
     // o contrário é seguro (a escrita é recusada pelo servidor antes de sair).
-    const aMaisNoPostgres = escrita.tabelasComEscrita.filter((t) => !TABELAS_ESCRITA.has(t));
+    const aMaisNoPostgres = escrita.identidade.tabelasComEscrita.filter(
+      (t) => !TABELAS_ESCRITA.has(t),
+    );
     if (aMaisNoPostgres.length > 0) {
       log(
         `AVISO: o utilizador de escrita tem INSERT em tabelas fora da whitelist deste servidor ` +
@@ -116,14 +113,23 @@ export async function arrancarDependencias(): Promise<EstadoArranque> {
     log("modo só-leitura (DATABASE_URL_WRITE não definida).");
   }
 
-  const estado: EstadoArranque = { escritaLigada: escrita !== null };
+  // O CONTEXTO. É aqui que se decide, uma vez, por que ligações é que as tools
+  // vão falar — e é este objeto que o criarServidor() recebe em vez do booleano
+  // que aqui estava. As duas ligações são passadas ao contexto de escrita; a de
+  // leitura é a MESMA nos dois casos, e é de propósito: as consultas ao catálogo
+  // e as contagens que acontecem a meio de uma escrita continuam a sair pelo
+  // utilizador menos privilegiado, dentro da transação READ ONLY.
+  const contexto: ContextoAcesso =
+    escrita === null
+      ? criarContextoLeitura("leitura", ligacaoLeitura)
+      : criarContextoEscrita("escrita", ligacaoLeitura, escrita.ligacao);
 
   // O resumo das tools é logado AQUI e não dentro do criarServidor(), embora
   // seja lá que elas são de facto registadas. A razão é o modo HTTP: com um
   // McpServer por sessão, um log dentro do criarServidor() repetia estas duas
   // linhas de cada vez que um cliente se ligasse. Isto descreve a CONFIGURAÇÃO
   // do processo, que é decidida aqui e não muda mais.
-  if (estado.escritaLigada) {
+  if (temEscrita(contexto)) {
     log(
       "9 tools disponíveis: list_tables, describe_table, sample_rows, run_query, " +
         "insert_row, update_row, archive_row, restore_row, delete_row.",
@@ -136,7 +142,7 @@ export async function arrancarDependencias(): Promise<EstadoArranque> {
     log("4 tools disponíveis: list_tables, describe_table, sample_rows, run_query.");
   }
 
-  return estado;
+  return contexto;
 }
 
 /**
@@ -149,26 +155,33 @@ export async function arrancarDependencias(): Promise<EstadoArranque> {
  *
  * Não faz logging. Ver a nota no fim do arrancarDependencias().
  */
-export function criarServidor(estado: EstadoArranque): McpServer {
+export function criarServidor(contexto: ContextoAcesso): McpServer {
   const server = new McpServer({
     name: "distribuidor-db",
     version: "1.0.0",
   });
 
-  registarListTables(server);
-  registarDescribeTable(server);
-  registarSampleRows(server);
-  registarRunQuery(server);
+  // As tools de leitura aceitam um ContextoLeitura, e um ContextoEscrita
+  // satisfá-lo por herança — servem os dois casos sem saberem que casos existem.
+  registarListTables(server, contexto);
+  registarDescribeTable(server, contexto);
+  registarSampleRows(server, contexto);
+  registarRunQuery(server, contexto);
 
-  if (estado.escritaLigada) {
-    registarInsertRow(server);
-    registarUpdateRow(server);
+  // O `temEscrita` estreita o tipo, e é essa estreiteza que os cinco registos
+  // abaixo exigem: eles pedem um ContextoEscrita, portanto chamá-los fora deste
+  // bloco não compila. A garantia de que um papel só-de-leitura não fica com
+  // tools de escrita registadas deixou de depender de alguém se lembrar do `if`
+  // — passou a ser verificada pelo compilador.
+  if (temEscrita(contexto)) {
+    registarInsertRow(server, contexto);
+    registarUpdateRow(server, contexto);
     // A ordem de registo não tem significado técnico, mas esta é a ordem do ciclo
     // de vida de um registo — criar, editar, arquivar, repor, destruir — e é a
     // que torna a lista legível para quem a lê de uma ponta à outra.
-    registarArchiveRow(server);
-    registarRestoreRow(server);
-    registarDeleteRow(server);
+    registarArchiveRow(server, contexto);
+    registarRestoreRow(server, contexto);
+    registarDeleteRow(server, contexto);
   }
 
   return server;

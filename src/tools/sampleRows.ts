@@ -9,14 +9,14 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { executarSoLeitura } from "../db.js";
+import type { ContextoLeitura } from "../acesso/contexto.js";
 import { citarIdentificador, resolverTabela } from "../identificadores.js";
 import { respostaErro, respostaOk } from "./resposta.js";
 
 const LINHAS_OMISSAO = 10;
 const LINHAS_MAXIMO = 50;
 
-export function registarSampleRows(server: McpServer): void {
+export function registarSampleRows(server: McpServer, contexto: ContextoLeitura): void {
   server.registerTool(
     "sample_rows",
     {
@@ -52,7 +52,7 @@ export function registarSampleRows(server: McpServer): void {
         // utilizador é usado só como VALOR numa query parametrizada ao catálogo.
         // O que volta é um nome vindo do próprio Postgres, e é esse — já
         // garantidamente existente — que pode ser concatenado no SQL a seguir.
-        const nome = await resolverTabela(tabela);
+        const nome = await resolverTabela(contexto, tabela);
         const nomeCitado = citarIdentificador(nome);
 
         // O nome da tabela é concatenado (não há alternativa: identificadores não
@@ -63,7 +63,7 @@ export function registarSampleRows(server: McpServer): void {
         // tabela inteira antes de devolver 10 linhas; sem ele, para uma amostra,
         // a query pára assim que tiver as linhas que precisa. A ordem não é
         // garantida, mas para "mostra-me como são os dados" isso não importa.
-        const resultado = await executarSoLeitura(
+        const resultado = await contexto.executarLeitura(
           `SELECT * FROM ${nomeCitado} LIMIT $1`,
           [linhas],
           { incluirArquivados: incluir_arquivados },

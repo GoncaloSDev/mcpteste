@@ -14,22 +14,35 @@
  */
 
 import pg from "pg";
-import { ErroValidacao } from "./erros.js";
 import { GUC_INCLUIR_ARQUIVADOS } from "./seguranca/arquivo.js";
 import { verificarLinhasAfetadas } from "./seguranca/escrita-camada3-linhas.js";
 
 const { Pool } = pg;
 
-/** Null enquanto o modo de escrita não estiver ligado — que é o estado normal. */
-let pool: pg.Pool | null = null;
+/**
+ * Uma ligação de escrita já aberta. Ver a nota gémea no db.ts: era uma variável
+ * de módulo e deixou de o poder ser quando o mesmo processo passou a servir
+ * papéis diferentes. Agora é passada ao `executarEscrita`.
+ */
+export interface LigacaoEscrita {
+  readonly pool: pg.Pool;
+  readonly timeoutMs: number;
+}
 
-let timeoutMs = 5000;
+/** Registo de ciclo de vida, para o encerramento fechar o que abriu. */
+const poolsAbertos = new Set<pg.Pool>();
 
 export interface IdentidadeEscrita {
   utilizador: string;
   baseDeDados: string;
   /** Tabelas onde este utilizador tem mesmo INSERT segundo o Postgres. */
   tabelasComEscrita: string[];
+}
+
+/** O que o arranque da escrita devolve, quando está configurada. */
+export interface EscritaArrancada {
+  ligacao: LigacaoEscrita;
+  identidade: IdentidadeEscrita;
 }
 
 /**
@@ -44,7 +57,7 @@ export interface IdentidadeEscrita {
  * Falha com exceção se a variável existir mas a ligação não servir. Um modo de
  * escrita "meio ligado" é pior do que nenhum.
  */
-export async function arrancarEscrita(): Promise<IdentidadeEscrita | null> {
+export async function arrancarEscrita(): Promise<EscritaArrancada | null> {
   // Lido aqui dentro, e não no corpo do módulo, pela mesma razão que no db.ts:
   // em ESM os imports são avaliados antes da primeira linha do index.ts, e um
   // process.env lido no topo do ficheiro correria antes de o dotenv carregar.
@@ -54,9 +67,9 @@ export async function arrancarEscrita(): Promise<IdentidadeEscrita | null> {
     return null;
   }
 
-  timeoutMs = lerTimeoutDoAmbiente();
+  const timeoutMs = lerTimeoutDoAmbiente();
 
-  pool = new Pool({
+  const pool = new Pool({
     connectionString,
     // Duas chegam: as escritas são raras e chegam em série. Manter este pool
     // pequeno também limita quantas transações de escrita podem existir ao mesmo
@@ -72,6 +85,8 @@ export async function arrancarEscrita(): Promise<IdentidadeEscrita | null> {
   pool.on("error", (erro) => {
     console.error("[db-escrita] erro numa ligação inativa do pool:", erro.message);
   });
+
+  poolsAbertos.add(pool);
 
   const cliente = await pool.connect();
   try {
@@ -125,18 +140,16 @@ export async function arrancarEscrita(): Promise<IdentidadeEscrita | null> {
     );
 
     return {
-      utilizador: linha.utilizador,
-      baseDeDados: linha.base,
-      tabelasComEscrita: escreviveis.rows.map((r) => r.tabela),
+      ligacao: { pool, timeoutMs },
+      identidade: {
+        utilizador: linha.utilizador,
+        baseDeDados: linha.base,
+        tabelasComEscrita: escreviveis.rows.map((r) => r.tabela),
+      },
     };
   } finally {
     cliente.release();
   }
-}
-
-/** Se o modo de escrita está ligado. */
-export function escritaLigada(): boolean {
-  return pool !== null;
 }
 
 /**
@@ -177,14 +190,14 @@ export interface OpcoesEscrita {
 }
 
 export async function executarEscrita<T extends pg.QueryResultRow>(
+  ligacao: LigacaoEscrita,
   sql: string,
   parametros: unknown[],
   operacao: string,
   alvo: string,
   opcoes: OpcoesEscrita = {},
 ): Promise<pg.QueryResult<T>> {
-  const clientePool = obterPool();
-  const cliente = await clientePool.connect();
+  const cliente = await ligacao.pool.connect();
 
   try {
     // Sem READ ONLY, pela razão óbvia — e é precisamente por esta transação não
@@ -195,7 +208,7 @@ export async function executarEscrita<T extends pg.QueryResultRow>(
     // devolução da ligação ao pool, contaminando as chamadas seguintes.
     // O valor é interpolado porque um SET não aceita parâmetros; é seguro porque
     // vem validado como inteiro do lerTimeoutDoAmbiente().
-    await cliente.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
+    await cliente.query(`SET LOCAL statement_timeout = ${ligacao.timeoutMs}`);
 
     // Ver a nota gémea no db.ts. O LOCAL faz a exceção morrer neste COMMIT, e
     // isso importa ainda mais deste lado: uma exceção presa a uma ligação de
@@ -223,24 +236,11 @@ export async function executarEscrita<T extends pg.QueryResultRow>(
   }
 }
 
-/** Fecha o pool de escrita, se existir. Chamado no encerramento do servidor. */
+/** Fecha os pools de escrita, se existirem. Chamado no encerramento. */
 export async function fecharEscrita(): Promise<void> {
-  if (pool !== null) {
-    await pool.end();
-    pool = null;
-  }
-}
-
-function obterPool(): pg.Pool {
-  if (pool === null) {
-    // Só acontece se uma tool de escrita chegar a ser chamada com o modo
-    // desligado — e nesse caso ela nem sequer foi registada, portanto seria um
-    // bug nosso. A mensagem é para quem estiver a ler os logs, não para o modelo.
-    throw new ErroValidacao(
-      "O modo de escrita não está ligado neste servidor (DATABASE_URL_WRITE não definida).",
-    );
-  }
-  return pool;
+  const pools = [...poolsAbertos];
+  poolsAbertos.clear();
+  await Promise.all(pools.map((p) => p.end()));
 }
 
 /** Igual ao do db.ts, e deliberadamente não partilhado: se um dia a escrita

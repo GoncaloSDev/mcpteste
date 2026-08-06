@@ -19,7 +19,7 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { executarEscrita } from "../db-escrita.js";
+import type { ContextoEscrita } from "../acesso/contexto.js";
 import { citarIdentificador } from "../identificadores.js";
 import {
   COLUNA_ARQUIVO,
@@ -35,7 +35,7 @@ import {
 import { construirAtribuicoes, descreverChave, esquemaValores } from "./escritaComum.js";
 import { respostaErro, respostaOk } from "./resposta.js";
 
-export function registarArchiveRow(server: McpServer): void {
+export function registarArchiveRow(server: McpServer, contexto: ContextoEscrita): void {
   server.registerTool(
     "archive_row",
     {
@@ -69,7 +69,7 @@ export function registarArchiveRow(server: McpServer): void {
     },
     async ({ tabela, chave }) => {
       try {
-        const alvo = await resolverAlvoEscrita(tabela);
+        const alvo = await resolverAlvoEscrita(contexto, tabela);
         const chaveTipada = chave as Record<string, ValorColuna>;
         const colunasChave = validarChavePrimaria(alvo, chaveTipada);
 
@@ -81,6 +81,7 @@ export function registarArchiveRow(server: McpServer): void {
         // Camada 3 diria "nenhuma linha corresponde" — verdade, mas inútil: o
         // conselho certo é diferente conforme o caso.
         const estado = await lerEstadoArquivo(
+          contexto,
           alvo.tabela,
           condicoes.fragmentos,
           condicoes.parametros,
@@ -119,7 +120,7 @@ export function registarArchiveRow(server: McpServer): void {
         // WITH CHECK (true) da política, que existe precisamente para deixar
         // passar a linha nova, não chega: ele governa a política de escrita, e
         // quem estava a barrar era a de leitura.)
-        const resultado = await executarEscrita(
+        const resultado = await contexto.executarEscrita(
           sql,
           condicoes.parametros,
           "UPDATE",

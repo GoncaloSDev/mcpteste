@@ -8,8 +8,7 @@
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { executarSoLeitura } from "../db.js";
-import { escritaLigada } from "../db-escrita.js";
+import { temEscrita, type ContextoLeitura } from "../acesso/contexto.js";
 import { citarIdentificador } from "../identificadores.js";
 import { COLUNA_ARQUIVO } from "../seguranca/arquivo.js";
 import { TABELAS_ESCRITA } from "../seguranca/escrita-camada1-alvo.js";
@@ -75,7 +74,10 @@ const SQL_TABELAS = `
  * Corre com o véu do arquivo levantado, porque é a única forma de contar o que
  * ele esconde.
  */
-async function contarArquivadas(tabelas: readonly string[]): Promise<Map<string, number>> {
+async function contarArquivadas(
+  contexto: ContextoLeitura,
+  tabelas: readonly string[],
+): Promise<Map<string, number>> {
   const contagens = new Map<string, number>();
   if (tabelas.length === 0) {
     return contagens;
@@ -87,7 +89,7 @@ async function contarArquivadas(tabelas: readonly string[]): Promise<Map<string,
       `FROM ${citarIdentificador(t)} WHERE ${citarIdentificador(COLUNA_ARQUIVO)} IS NOT NULL`,
   );
 
-  const resultado = await executarSoLeitura<{ tabela: string; n: string }>(
+  const resultado = await contexto.executarLeitura<{ tabela: string; n: string }>(
     partes.join(" UNION ALL "),
     [],
     { incluirArquivados: true },
@@ -111,7 +113,7 @@ function literalDeTexto(valor: string): string {
   return `'${valor.replace(/'/g, "''")}'`;
 }
 
-export function registarListTables(server: McpServer): void {
+export function registarListTables(server: McpServer, contexto: ContextoLeitura): void {
   server.registerTool(
     "list_tables",
     {
@@ -127,8 +129,9 @@ export function registarListTables(server: McpServer): void {
     },
     async () => {
       try {
-        const resultado = await executarSoLeitura<LinhaTabela>(SQL_TABELAS);
+        const resultado = await contexto.executarLeitura<LinhaTabela>(SQL_TABELAS);
         const arquivadasPorTabela = await contarArquivadas(
+          contexto,
           resultado.rows.map((linha) => linha.tabela),
         );
 
@@ -137,7 +140,13 @@ export function registarListTables(server: McpServer): void {
         // criaria uma segunda lista para manter em sincronia dentro do MESMO
         // repositório — que é exatamente o tipo de duplicação sem valor (a
         // duplicação que interessa é a do lado da base, que é independente).
-        const podeEscrever = escritaLigada();
+        //
+        // A pergunta que isto responde mudou de "este PROCESSO tem ligação de
+        // escrita?" para "este CONTEXTO tem?" — que é a pergunta certa desde que
+        // o mesmo processo serve papéis diferentes. Um papel só-de-leitura vê
+        // escrivel=false mesmo que o processo tenha um pool de escrita aberto
+        // para outro papel.
+        const podeEscrever = temEscrita(contexto);
         const tabelas = resultado.rows.map((linha) => ({
           ...linha,
           escrivel: podeEscrever && TABELAS_ESCRITA.has(linha.tabela),

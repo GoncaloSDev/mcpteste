@@ -18,7 +18,7 @@
  * ela esteja arquivada ou não.
  */
 
-import { executarSoLeitura } from "../db.js";
+import type { ContextoLeitura } from "../acesso/contexto.js";
 import { ErroValidacao } from "../erros.js";
 import { citarIdentificador } from "../identificadores.js";
 
@@ -79,11 +79,12 @@ export interface EstadoArquivo {
  * nada.
  */
 export async function lerEstadoArquivo(
+  contexto: ContextoLeitura,
   tabela: string,
   fragmentosChave: readonly string[],
   parametros: readonly unknown[],
 ): Promise<EstadoArquivo> {
-  const resultado = await executarSoLeitura<{ arquivado_em: Date | null }>(
+  const resultado = await contexto.executarLeitura<{ arquivado_em: Date | null }>(
     `SELECT ${citarIdentificador(COLUNA_ARQUIVO)} AS arquivado_em ` +
       `FROM ${citarIdentificador(tabela)} ` +
       `WHERE ${fragmentosChave.join(" AND ")}`,

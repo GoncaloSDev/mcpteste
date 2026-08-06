@@ -8,12 +8,12 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { executarSoLeitura, timeoutEmVigor } from "../db.js";
+import type { ContextoLeitura } from "../acesso/contexto.js";
 import { validarSelectUnico } from "../seguranca/camada1-parser.js";
 import { aplicarLimite, lerLimitesDoAmbiente } from "../seguranca/camada3-limites.js";
 import { respostaErro, respostaOk } from "./resposta.js";
 
-export function registarRunQuery(server: McpServer): void {
+export function registarRunQuery(server: McpServer, contexto: ContextoLeitura): void {
   const limites = lerLimitesDoAmbiente();
 
   server.registerTool(
@@ -70,14 +70,14 @@ export function registarRunQuery(server: McpServer): void {
         // `sql` não é tocado. O filtro dos arquivados é uma política de RLS do
         // Postgres, não uma cláusula que este servidor acrescente; ligá-lo ou
         // desligá-lo não muda uma vírgula da query que o utilizador escreveu.
-        const resultado = await executarSoLeitura(limitada.sql, [], {
+        const resultado = await contexto.executarLeitura(limitada.sql, [], {
           incluirArquivados: incluir_arquivados,
         });
 
         return respostaOk({
           linhas: resultado.rowCount,
           limite_aplicado: limitada.nota,
-          timeout_ms: timeoutEmVigor(),
+          timeout_ms: contexto.timeoutMs,
           arquivados: incluir_arquivados
             ? "INCLUÍDOS — os resultados podem trazer linhas arquivadas. A coluna " +
               "arquivado_em distingue-as (NULL = ativa)."

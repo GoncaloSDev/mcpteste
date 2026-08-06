@@ -18,7 +18,7 @@
  * usada para a instrução final, e para mais nada.
  */
 
-import { executarSoLeitura } from "../db.js";
+import type { ContextoLeitura } from "../acesso/contexto.js";
 import { ErroValidacao } from "../erros.js";
 import { recusarEscritaDiretaNoArquivo } from "./arquivo.js";
 
@@ -125,7 +125,10 @@ const SQL_CHAVE_PRIMARIA = `
  * decide sem tocar na base de dados, e porque a mensagem que dá é a mais útil de
  * todas — "esta tabela existe, mas não se escreve nela, e a razão é esta".
  */
-export async function resolverAlvoEscrita(nomePedido: string): Promise<AlvoEscrita> {
+export async function resolverAlvoEscrita(
+  contexto: ContextoLeitura,
+  nomePedido: string,
+): Promise<AlvoEscrita> {
   // --- 1. Whitelist, antes de qualquer ida à base de dados -------------------
   // O nome do utilizador é comparado como VALOR, nunca concatenado em SQL.
   if (!TABELAS_ESCRITA.has(nomePedido)) {
@@ -141,8 +144,8 @@ export async function resolverAlvoEscrita(nomePedido: string): Promise<AlvoEscri
 
   // --- 2. Catálogo -----------------------------------------------------------
   const [colunas, chave] = await Promise.all([
-    executarSoLeitura<ColunaCatalogo>(SQL_COLUNAS, [nomePedido]),
-    executarSoLeitura<{ coluna: string }>(SQL_CHAVE_PRIMARIA, [nomePedido]),
+    contexto.executarLeitura<ColunaCatalogo>(SQL_COLUNAS, [nomePedido]),
+    contexto.executarLeitura<{ coluna: string }>(SQL_CHAVE_PRIMARIA, [nomePedido]),
   ]);
 
   if (colunas.rowCount === 0) {

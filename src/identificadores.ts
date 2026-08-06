@@ -7,7 +7,7 @@
  * concatenado com SQL, e por isso é o único sítio que precisa deste cuidado.
  */
 
-import { executarSoLeitura } from "./db.js";
+import type { ContextoLeitura } from "./acesso/contexto.js";
 import { ErroValidacao } from "./erros.js";
 
 /**
@@ -31,8 +31,11 @@ import { ErroValidacao } from "./erros.js";
  * information_schema já filtram por privilégios. O mcp_readonly nem sequer
  * CONSEGUE descobrir a existência de uma tabela onde não tenha SELECT.
  */
-export async function resolverTabela(nomePedido: string): Promise<string> {
-  const resultado = await executarSoLeitura<{ table_name: string }>(
+export async function resolverTabela(
+  contexto: ContextoLeitura,
+  nomePedido: string,
+): Promise<string> {
+  const resultado = await contexto.executarLeitura<{ table_name: string }>(
     `SELECT table_name
        FROM information_schema.tables
       WHERE table_schema = 'public'

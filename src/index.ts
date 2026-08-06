@@ -33,11 +33,11 @@ import {
 async function main(): Promise<void> {
   // --- 1. Dependências externas, antes de tudo o resto -----------------------
 
-  const estado = await arrancarDependencias();
+  const contexto = await arrancarDependencias();
 
   // --- 2. O servidor MCP e as suas tools ------------------------------------
 
-  const server = criarServidor(estado);
+  const server = criarServidor(contexto);
 
   // --- 3. Abrir o canal ------------------------------------------------------
 

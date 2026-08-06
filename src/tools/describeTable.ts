@@ -9,7 +9,7 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { executarSoLeitura } from "../db.js";
+import type { ContextoLeitura } from "../acesso/contexto.js";
 import { citarIdentificador, resolverTabela } from "../identificadores.js";
 import { COLUNA_ARQUIVO } from "../seguranca/arquivo.js";
 import { respostaErro, respostaOk } from "./resposta.js";
@@ -104,7 +104,7 @@ const SQL_CHAVES = `
    ORDER BY con.contype, k.ord
 `;
 
-export function registarDescribeTable(server: McpServer): void {
+export function registarDescribeTable(server: McpServer, contexto: ContextoLeitura): void {
   server.registerTool(
     "describe_table",
     {
@@ -129,11 +129,11 @@ export function registarDescribeTable(server: McpServer): void {
         // Confirma que existe e devolve o nome do catálogo. Aqui serve sobretudo
         // para dar um erro claro ("a tabela X não existe, usa o list_tables") em
         // vez de devolver uma lista de colunas vazia sem explicação.
-        const nome = await resolverTabela(tabela);
+        const nome = await resolverTabela(contexto, tabela);
 
         const [colunas, chaves] = await Promise.all([
-          executarSoLeitura<LinhaColuna>(SQL_COLUNAS, [nome]),
-          executarSoLeitura<LinhaChave & { tipo: string }>(SQL_CHAVES, [nome]),
+          contexto.executarLeitura<LinhaColuna>(SQL_COLUNAS, [nome]),
+          contexto.executarLeitura<LinhaChave & { tipo: string }>(SQL_CHAVES, [nome]),
         ]);
 
         const chavePrimaria = chaves.rows.filter((l) => l.tipo === "p").map((l) => l.coluna);
@@ -150,7 +150,7 @@ export function registarDescribeTable(server: McpServer): void {
         // Quantas linhas desta tabela estão arquivadas. Corre com o véu levantado
         // — com ele em baixo a resposta seria sempre zero, que é exatamente o
         // ponto do arquivo e exatamente o que aqui não serve.
-        const arquivadas = await executarSoLeitura<{ n: string }>(
+        const arquivadas = await contexto.executarLeitura<{ n: string }>(
           `SELECT count(*) AS n FROM ${citarIdentificador(nome)} ` +
             `WHERE ${citarIdentificador(COLUNA_ARQUIVO)} IS NOT NULL`,
           [],
