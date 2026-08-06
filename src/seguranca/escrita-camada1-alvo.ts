@@ -26,7 +26,7 @@ import { recusarEscritaDiretaNoArquivo } from "./arquivo.js";
  * As tabelas onde escrever é permitido: os dados mestre, 12 das 19.
  *
  * ESTA LISTA ESTÁ DUPLICADA, e é de propósito. A gémea vive no outro repositório,
- * em agentsystem-db/seed/src/tabelasEscrita.ts, onde vira privilégios reais do
+ * em testeai-db/seed/src/tabelasEscrita.ts, onde vira privilégios reais do
  * Postgres. Aqui vira uma recusa antes de existir query. São duas verificações
  * que não partilham ponto de falha: acrescentar uma tabela aqui e esquecer a de
  * lá dá um 42501 do Postgres, e a escrita não acontece. É o mesmo princípio das

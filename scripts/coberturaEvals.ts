@@ -31,7 +31,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * frequente ficar em disco com o nome do projeto.
  */
 const CANDIDATOS = [
-  "../../agentsystem-db/EVAL-QUESTIONS.md",
+  "../../testeai-db/EVAL-QUESTIONS.md",
   "../../mcpdbteste/EVAL-QUESTIONS.md",
 ];
 
@@ -62,7 +62,7 @@ function encontrarEvals(): string {
     "Não encontrei o EVAL-QUESTIONS.md do repositório da base de dados.\n" +
       `Procurei em:\n${CANDIDATOS.map((c) => `  ${resolve(__dirname, c)}`).join("\n")}\n` +
       "Indica-o com a variável de ambiente CAMINHO_EVALS, por exemplo:\n" +
-      "  CAMINHO_EVALS=../../agentsystem-db/EVAL-QUESTIONS.md npm run cobertura",
+      "  CAMINHO_EVALS=../../testeai-db/EVAL-QUESTIONS.md npm run cobertura",
   );
 }
 

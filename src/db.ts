@@ -71,7 +71,7 @@ export async function arrancarBaseDeDados(): Promise<IdentidadeLigacao> {
     connectionTimeoutMillis: 5_000,
     // Aparece na coluna application_name do pg_stat_activity. Serve para, com a
     // base aberta noutro sítio, se perceber qual das ligações é este servidor.
-    application_name: "agentsystem-mcp-server",
+    application_name: "testeai-mcp-server",
   });
 
   // NÃO-ÓBVIO e fácil de esquecer: este handler é para erros em ligações que

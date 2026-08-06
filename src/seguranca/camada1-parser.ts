@@ -128,7 +128,7 @@ const NOS_PROIBIDOS = new Set([
  * O mesmo se aplica ao statement_timeout, que é um parâmetro como qualquer
  * outro: `set_config('statement_timeout', '0', false)` desligava a Camada 3.
  *
- * ISTO É REDUNDANTE DE PROPÓSITO. O seed do agentsystem-db já revoga o EXECUTE
+ * ISTO É REDUNDANTE DE PROPÓSITO. O seed do testeai-db já revoga o EXECUTE
  * desta função ao mcp_readonly, portanto a chamada falharia na base de dados
  * mesmo que chegasse lá. São duas defesas que não partilham ponto de falha: uma
  * é sintática e decide aqui, sem rede; a outra é uma permissão do Postgres. Para

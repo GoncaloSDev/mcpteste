@@ -1,7 +1,7 @@
-# agentsystem-mcp-server
+# testeai-mcp-server
 
 Servidor MCP só-de-leitura sobre a base de dados de referência do distribuidor de
-materiais de construção ([agentsystem-db](../agentsystem-db)).
+materiais de construção ([testeai-db](../testeai-db)).
 
 Expõe quatro tools a um cliente MCP (Claude Desktop, Claude Code, MCP Inspector)
 e garante, por três camadas independentes, que nenhuma delas consegue escrever.
@@ -43,7 +43,7 @@ JOINs, subqueries ou CTEs.
 O que interessa perceber é **onde é que esse filtro vive**: não vive aqui. Nenhuma
 linha deste repositório acrescenta `WHERE arquivado_em IS NULL` a query nenhuma.
 Quem esconde as linhas é uma política de **Row-Level Security** do PostgreSQL,
-aplicada pelo seed do `agentsystem-db`.
+aplicada pelo seed do `testeai-db`.
 
 A razão é o `run_query`, que aceita SQL escrito de fora. Filtrar em TypeScript
 obrigaria a reescrever a árvore de cada `SELECT` para lhe acrescentar a condição
@@ -184,7 +184,7 @@ calculados — e não `INSERT`s linha a linha.
 `INSERT/UPDATE/DELETE` concedido **tabela a tabela**, nunca por
 `ALTER DEFAULT PRIVILEGES`: uma tabela criada amanhã nasce sem escrita. Sem DDL,
 sem `TRUNCATE`, nunca superutilizador. Os `GRANT` são aplicados pelo seed do
-[agentsystem-db](../agentsystem-db), a partir de `seed/src/tabelasEscrita.ts`.
+[testeai-db](../testeai-db), a partir de `seed/src/tabelasEscrita.ts`.
 
 O servidor **recusa-se a arrancar** em modo de escrita se a ligação for de
 superutilizador. Colar aqui a `DATABASE_URL_ADMIN` não funciona.
@@ -225,13 +225,13 @@ npm run teste:escrita   # 20 verificações; cria, edita e apaga um cliente de t
 ## Pré-requisitos
 
 - Node.js 22+
-- O container do [agentsystem-db](../agentsystem-db) a correr e povoado
+- O container do [testeai-db](../testeai-db) a correr e povoado
 
 ## Atualizar uma instalação anterior
 
 ### Vens de antes do arquivo (soft delete)?
 
-Faz primeiro a parte do `agentsystem-db` — o arquivo depende de uma coluna nova e
+Faz primeiro a parte do `testeai-db` — o arquivo depende de uma coluna nova e
 de políticas de RLS que só o seed cria. Sem isso, este servidor arranca e falha à
 primeira tool.
 
@@ -259,7 +259,7 @@ npm run teste:escrita    # 31/31 — precisa da DATABASE_URL_WRITE
 
 Se já tinhas este servidor a correr **antes de existirem as tools de escrita**, é
 este o caminho. Faz primeiro a parte do
-[agentsystem-db](../agentsystem-db#atualizar-uma-instalação-anterior) — sem o role
+[testeai-db](../testeai-db#atualizar-uma-instalação-anterior) — sem o role
 criado do lado da base, o passo 2 aqui não tem nada a que se ligar.
 
 ```powershell
@@ -272,7 +272,7 @@ Se parares aqui, **está tudo a funcionar** e o servidor continua só-de-leitura
 com as 4 tools de sempre. Nada do que se segue é obrigatório.
 
 **1. Ligar a escrita** — acrescenta ao `.env` a linha `DATABASE_URL_WRITE` que
-puseste no `.env` do `agentsystem-db` (é exatamente a mesma):
+puseste no `.env` do `testeai-db` (é exatamente a mesma):
 
 ```
 DATABASE_URL_WRITE=postgresql://mcp_escrita:<password>@localhost:5434/distribuidor
@@ -301,7 +301,7 @@ Copy-Item .env.example .env
 ```
 
 Abre o `.env` e preenche a `DATABASE_URL_READONLY`. A password é a
-`READONLY_PASSWORD` do `.env` do `agentsystem-db`, e a porta é a
+`READONLY_PASSWORD` do `.env` do `testeai-db`, e a porta é a
 `POSTGRES_HOST_PORT` desse mesmo ficheiro (**5434** na configuração atual, não a
 5432 por omissão do Postgres):
 
@@ -314,7 +314,7 @@ DATABASE_URL_READONLY=postgresql://mcp_readonly:<password>@localhost:5434/distri
 > ligação de superutilizador.
 
 Para ligar as tools de escrita, acrescenta também a `DATABASE_URL_WRITE` (é a do
-`mcp_escrita`, criada pelo seed do `agentsystem-db`). Sem ela, o servidor arranca
+`mcp_escrita`, criada pelo seed do `testeai-db`). Sem ela, o servidor arranca
 só-de-leitura — que é o comportamento por omissão e o recomendado. Ver
 [Escrita](#escrita-opcional-desligada-por-omissão).
 
@@ -412,7 +412,7 @@ verificação é que a base ficou **como estava**: pode correr-se contra a base 
 referência sem estragar as respostas do `EVAL-QUESTIONS.md`.
 
 O `cobertura` precisa do `EVAL-QUESTIONS.md`, que vive no **outro** repositório.
-Procura-o sozinho em `../agentsystem-db/` e `../mcpdbteste/` (relativos a este
+Procura-o sozinho em `../testeai-db/` e `../mcpdbteste/` (relativos a este
 repositório). Se o tiveres noutro sítio, aponta-lho:
 
 ```powershell
@@ -430,7 +430,7 @@ As camadas 1 e 3 apanham quase tudo antes de a 2 entrar em jogo, portanto ela
 quase nunca dispara — e é preciso prová-la à parte. Como **admin**, de propósito:
 
 ```powershell
-cd ..\agentsystem-db
+cd ..\testeai-db
 docker compose exec db psql -U admin_dist -d distribuidor -c "BEGIN TRANSACTION READ ONLY; UPDATE clientes SET nome='x' WHERE no_cli=1;"
 ```
 
@@ -445,7 +445,7 @@ lado da base ficou bem configurado — útil sobretudo depois de instalar noutra
 máquina, porque não precisa de Node nem de build.
 
 ```powershell
-cd ..\agentsystem-db
+cd ..\testeai-db
 $env:PGPASSWORD = "<a ESCRITA_PASSWORD do .env>"
 
 # 1. Não é superutilizador — tem de responder "off"
@@ -492,7 +492,7 @@ code $env:AppData\Claude\claude_desktop_config.json
   "mcpServers": {
     "distribuidor": {
       "command": "node",
-      "args": ["C:\\DEV\\testesmcps\\agentsystem-mcp-server\\dist\\index.js"],
+      "args": ["C:\\DEV\\testesmcps\\testeai-mcp-server\\dist\\index.js"],
       "env": {
         "DATABASE_URL_READONLY": "postgresql://mcp_readonly:<password>@localhost:5434/distribuidor"
       }
@@ -539,13 +539,13 @@ Os logs (o nosso stderr) ficam em `%AppData%\Claude\logs\mcp-server-distribuidor
 ## 5. Registar no Claude Code
 
 ```powershell
-claude mcp add distribuidor --env DATABASE_URL_READONLY="postgresql://mcp_readonly:<password>@localhost:5434/distribuidor" -- node C:\DEV\testesmcps\agentsystem-mcp-server\dist\index.js
+claude mcp add distribuidor --env DATABASE_URL_READONLY="postgresql://mcp_readonly:<password>@localhost:5434/distribuidor" -- node C:\DEV\testesmcps\testeai-mcp-server\dist\index.js
 ```
 
 Com escrita, um segundo `--env`:
 
 ```powershell
-claude mcp add distribuidor --env DATABASE_URL_READONLY="postgresql://mcp_readonly:<password>@localhost:5434/distribuidor" --env DATABASE_URL_WRITE="postgresql://mcp_escrita:<password>@localhost:5434/distribuidor" -- node C:\DEV\testesmcps\agentsystem-mcp-server\dist\index.js
+claude mcp add distribuidor --env DATABASE_URL_READONLY="postgresql://mcp_readonly:<password>@localhost:5434/distribuidor" --env DATABASE_URL_WRITE="postgresql://mcp_escrita:<password>@localhost:5434/distribuidor" -- node C:\DEV\testesmcps\testeai-mcp-server\dist\index.js
 ```
 
 Ou, para o servidor ficar disponível só neste projeto, um `.mcp.json` na raiz com

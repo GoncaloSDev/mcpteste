@@ -109,7 +109,7 @@ export async function arrancarDependencias(): Promise<EstadoArranque> {
       log(
         `AVISO: o utilizador de escrita tem INSERT em tabelas fora da whitelist deste servidor ` +
           `(${aMaisNoPostgres.join(", ")}). As tools recusam-nas à mesma, mas os GRANT do seed ` +
-          `ficaram largos de mais — corre outra vez o seed do agentsystem-db.`,
+          `ficaram largos de mais — corre outra vez o seed do testeai-db.`,
       );
     }
   } else {

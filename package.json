@@ -1,5 +1,5 @@
 {
-  "name": "agentsystem-mcp-server",
+  "name": "testeai-mcp-server",
   "version": "1.0.0",
   "private": true,
   "description": "Servidor MCP só-de-leitura sobre a BD de referência do distribuidor de materiais de construção.",

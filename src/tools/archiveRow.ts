@@ -10,7 +10,7 @@
  * distingue esta implementação de uma que só parecesse funcionar: tudo o que esta
  * tool faz é preencher uma coluna com um timestamp. Quem esconde a linha é uma
  * política de Row-Level Security do Postgres, aplicada a todas as tabelas pelo
- * seed do agentsystem-db. Não há aqui nenhum filtro a acrescentar a nenhuma query
+ * seed do testeai-db. Não há aqui nenhum filtro a acrescentar a nenhuma query
  * — e é por não haver que não há nenhum sítio onde ele possa faltar.
  *
  * Ao contrário do delete_row, não exige `confirmar`. Não precisa: é reversível, e

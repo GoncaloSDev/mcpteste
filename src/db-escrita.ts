@@ -64,9 +64,9 @@ export async function arrancarEscrita(): Promise<IdentidadeEscrita | null> {
     max: 2,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
-    // Distingue-se do "agentsystem-mcp-server" das leituras no pg_stat_activity.
+    // Distingue-se do "testeai-mcp-server" das leituras no pg_stat_activity.
     // Com a base aberta noutro sítio, vê-se logo qual das ligações pode escrever.
-    application_name: "agentsystem-mcp-server[escrita]",
+    application_name: "testeai-mcp-server[escrita]",
   });
 
   pool.on("error", (erro) => {

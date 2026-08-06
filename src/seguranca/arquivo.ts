@@ -4,7 +4,7 @@
  * Este ficheiro é pequeno de propósito, e o que ele NÃO faz é a parte
  * interessante: não filtra nada. O filtro que esconde os registos arquivados não
  * vive aqui nem em nenhuma tool — vive no Postgres, numa política de Row-Level
- * Security aplicada pelo seed do agentsystem-db (ver reporRlsArquivo() lá).
+ * Security aplicada pelo seed do testeai-db (ver reporRlsArquivo() lá).
  *
  * A razão é o `run_query`. Sendo ele uma tool que aceita SQL escrito do outro
  * lado, um filtro em TypeScript teria de reescrever a árvore de cada SELECT para
