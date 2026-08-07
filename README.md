@@ -11,6 +11,19 @@ editam, arquivam, repõem e apagam **uma linha de cada vez** nas tabelas de dado
 mestre. Ver [Escrita](#escrita-opcional-desligada-por-omissão) e
 [Arquivo](#arquivo-soft-delete).
 
+**Quem vê que tools é decidido pelo PERFIL DE ACESSO**, não pela configuração do
+processo. Há dois perfis, declarados em `src/acesso/perfis.ts`:
+
+| Perfil | Tools | Precisa de |
+|---|---|---|
+| `employee` (omissão) | as 4 de leitura | `DATABASE_URL_READONLY` |
+| `admin` | as 9 | também `DATABASE_URL_WRITE` |
+
+No **stdio** o perfil é do processo e escolhe-se com `MCP_PERFIL`; no **HTTP** vem
+da identidade de quem chama, num token Bearer assinado, uma por sessão — e o
+mesmo processo serve os dois. Ver [Perfis de acesso](#perfis-de-acesso) e
+[Transporte HTTP](#transporte-http-streamable-http).
+
 ## Tools
 
 | Tool | O que faz |
@@ -23,7 +36,7 @@ mestre. Ver [Escrita](#escrita-opcional-desligada-por-omissão) e
 O `run_query` e o `sample_rows` aceitam `incluir_arquivados` (por omissão `false`)
 — ver [Arquivo](#arquivo-soft-delete).
 
-Só com `DATABASE_URL_WRITE` definida:
+Só no perfil `admin` (que exige a `DATABASE_URL_WRITE`):
 
 | Tool | O que faz |
 |---|---|
@@ -141,13 +154,53 @@ Queries sem `LIMIT` recebem `LIMIT 200`; um `LIMIT` explícito acima de 500 é
 recusado; cada query tem 5 segundos de `statement_timeout` aplicado do lado do
 Postgres.
 
+## Perfis de acesso
+
+Um perfil junta as três coisas que decidem o que uma sessão pode fazer: **que
+ligações usa, que tools expõe, e como se chama.** Vivem em `src/acesso/perfis.ts`,
+que é a única fonte de verdade sobre "que papel vê que tools".
+
+```
+employee  ->  leitura: DATABASE_URL_READONLY                                 4 tools
+admin     ->  leitura: DATABASE_URL_READONLY  +  escrita: DATABASE_URL_WRITE  9 tools
+```
+
+Três propriedades que não são acidentais:
+
+- **As leituras de TODOS os perfis saem por `mcp_readonly`.** Mesmo no caminho de
+  escrita — resolver a tabela, ler o estado de arquivo, contar a cascata, o
+  `run_query` de um admin — tudo passa pelo `executarSoLeitura`, dentro de
+  `BEGIN TRANSACTION READ ONLY`. Só o `INSERT`/`UPDATE`/`DELETE` sai por
+  `mcp_escrita`.
+- **Um pool por connection string, não por perfil.** Os dois perfis leem pela
+  mesma variável, portanto partilham um pool. Um papel novo custa zero ligações
+  ao Postgres.
+- **A ligação de escrita e as tools de escrita são um grupo só** na declaração do
+  perfil. Um perfil com tools de escrita e sem ligação por onde as executar não é
+  "recusado no arranque" — **não compila**.
+
+### Escolher o perfil no stdio
+
+`MCP_PERFIL=employee` (omissão) ou `MCP_PERFIL=admin`. Só o perfil pedido é
+configurado: um processo lançado como `employee` **nem lê do ambiente** a
+connection string de escrita, quanto mais abrir um pool com ela.
+
+Um perfil pedido e não configurado — `admin` sem `DATABASE_URL_WRITE` — **faz o
+servidor não arrancar**, em vez de cair caladamente no perfil de omissão. Um
+servidor com menos tools do que quem o arrancou julga descobre-se por uma tool
+"que desapareceu", e isso custa mais tempo do que uma linha no stderr.
+
 ## Escrita (opcional, desligada por omissão)
 
-Sem `DATABASE_URL_WRITE` no ambiente, este servidor é exatamente o que sempre
-foi: quatro tools, nenhuma capaz de escrever. **Nada muda para quem não a
-definir.** É a mesma build — a decisão é de configuração, o que permite registar
-o mesmo `dist/index.js` duas vezes no cliente MCP, uma entrada só-leitura e outra
-com escrita.
+No perfil `employee`, este servidor é exatamente o que sempre foi: quatro tools,
+nenhuma capaz de escrever. **Nada muda para quem não configurar a escrita.** É a
+mesma build — a decisão é de configuração, o que permite registar o mesmo
+`dist/index.js` duas vezes no cliente MCP, uma entrada só-leitura e outra com
+escrita.
+
+> **Ter a `DATABASE_URL_WRITE` definida já não chega.** Desde os perfis, o papel
+> é pedido por nome: sem `MCP_PERFIL=admin` o servidor arranca em só-leitura à
+> mesma e nem sequer lê essa variável.
 
 ### As tools de escrita não aceitam SQL
 
@@ -219,7 +272,7 @@ Escrever na base faz as **50 respostas do `EVAL-QUESTIONS.md` deixarem de bater
 certo**. Para as repor, correr outra vez o seed.
 
 ```powershell
-npm run teste:escrita   # 20 verificações; cria, edita e apaga um cliente de teste
+npm run teste:escrita   # 31 verificações; cria, edita e apaga um cliente de teste
 ```
 
 ## Pré-requisitos
@@ -281,8 +334,8 @@ DATABASE_URL_WRITE=postgresql://mcp_escrita:<password>@localhost:5434/distribuid
 **2. Verificar:**
 
 ```powershell
-npm run teste            # 19/19 — a leitura não regrediu
-npm run teste:escrita    # 19/19 — precisa da DATABASE_URL_WRITE
+npm run teste            # 22/22 — a leitura não regrediu
+npm run teste:escrita    # 31/31 — precisa da DATABASE_URL_WRITE e de MCP_PERFIL=admin
 ```
 
 O `teste:escrita` cria, edita e apaga um cliente `999999` e confirma no fim que a
@@ -313,10 +366,11 @@ DATABASE_URL_READONLY=postgresql://mcp_readonly:<password>@localhost:5434/distri
 > razão para conseguir escrever — e o de escrita recusa-se a arrancar com uma
 > ligação de superutilizador.
 
-Para ligar as tools de escrita, acrescenta também a `DATABASE_URL_WRITE` (é a do
-`mcp_escrita`, criada pelo seed do `testeai-db`). Sem ela, o servidor arranca
-só-de-leitura — que é o comportamento por omissão e o recomendado. Ver
-[Escrita](#escrita-opcional-desligada-por-omissão).
+Para ligar as tools de escrita são precisas **duas** coisas: a
+`DATABASE_URL_WRITE` (a do `mcp_escrita`, criada pelo seed do `testeai-db`) **e**
+`MCP_PERFIL=admin`. Sem as duas o servidor arranca só-de-leitura — que é o
+comportamento por omissão e o recomendado. Ver
+[Perfis de acesso](#perfis-de-acesso).
 
 ## 2. Compilar e confirmar
 
@@ -331,8 +385,8 @@ O arranque tem de mostrar, no **stderr**:
 [mcp] parser do PostgreSQL carregado.
 [mcp] ligado a distribuidor (PostgreSQL 18.4)
 [mcp] current_user = mcp_readonly          <-- a confirmação que interessa
-[mcp] modo só-leitura (DATABASE_URL_WRITE não definida).
-[mcp] 4 tools registadas: list_tables, describe_table, sample_rows, run_query.
+[mcp] perfil 'employee': 4 tools — list_tables, describe_table, sample_rows, run_query.
+[mcp] perfil em uso: employee.
 [mcp] servidor pronto, à escuta em stdio.
 ```
 
@@ -340,14 +394,22 @@ Aquele `current_user` é a verificação mais barata de que a ligação não est
 engano, a usar a connection string de admin. Se lá aparecer `admin_dist`, o
 `.env` está errado.
 
-Com a escrita ligada, as duas linhas do meio passam a ser quatro:
+Com `MCP_PERFIL=admin` e a `DATABASE_URL_WRITE` definida:
 
 ```
 [mcp] current_user = mcp_readonly
 [mcp] ESCRITA LIGADA — current_user = mcp_escrita
 [mcp] o Postgres concede INSERT a este utilizador em 12 tabelas: armazens, artfam, ...
-[mcp] 9 tools registadas: list_tables, describe_table, sample_rows, run_query, insert_row, update_row, archive_row, restore_row, delete_row.
+[mcp] perfil 'admin': 9 tools — list_tables, ..., delete_row.
 [mcp] arquivo: archive_row esconde (reversível); delete_row destrói em cascata e exige que a linha já esteja arquivada.
+[mcp] perfil em uso: admin.
+```
+
+Com `MCP_PERFIL=admin` mas **sem** a `DATABASE_URL_WRITE`, o servidor não sobe:
+
+```
+[mcp] perfil 'admin' não configurado: falta DATABASE_URL_WRITE (a escrita é opt-in).
+[mcp] FALHA NO ARRANQUE: Nenhum perfil de acesso pôde ser configurado — o servidor não teria nada que fazer.
 ```
 
 Se aparecerem 19 tabelas em vez de 12, os `GRANT` do seed ficaram largos de mais
@@ -400,14 +462,22 @@ de topo continua a ser um `SelectStmt`. Só a varredura recursiva o apanha.
 ### A mesma bateria, automatizada
 
 ```powershell
-npm run teste           # 19 verificações através de um cliente MCP real por stdio
-npm run cobertura       # passa as 50 queries do EVAL-QUESTIONS.md pela Camada 1
-npm run teste:escrita   # 19 verificações do caminho de escrita
+npm run cobertura       # 50/50 — as queries do EVAL-QUESTIONS.md passam a Camada 1
+npm run teste           # 22 verificações por um cliente MCP real, por stdio
+npm run teste:escrita   # 31 verificações do caminho de escrita
+npm run teste:http      # 16 verificações da autenticação e dos perfis, por HTTP
 ```
+
+O `teste:http` lança o servidor num porto próprio, com segredos gerados na hora,
+e afirma pelo cabo real: sem token → 401, assinatura adulterada → 401, expirado →
+401, audiência errada → 401, papel sem perfil → 403, employee → 4 tools, admin →
+9, e — a que decide a fase — **um `Mcp-Session-Id` de employee com um token de
+admin → 403**. Precisa da `DATABASE_URL_WRITE`, senão metade não teria o que
+verificar.
 
 O `teste:escrita` só corre com a `DATABASE_URL_WRITE` definida — sem ela as tools
 de escrita nem sequer são registadas, e o script sai a dizê-lo em vez de falhar
-dezanove vezes seguidas. Cria, edita e apaga um cliente `999999` e a última
+trinta e uma vezes seguidas. Cria, edita e apaga um cliente `999999` e a última
 verificação é que a base ficou **como estava**: pode correr-se contra a base de
 referência sem estragar as respostas do `EVAL-QUESTIONS.md`.
 
@@ -501,21 +571,25 @@ code $env:AppData\Claude\claude_desktop_config.json
 }
 ```
 
-Para ligar as tools de escrita, acrescenta uma segunda entrada ao bloco `env` —
-**e a vírgula no fim da primeira**, senão o JSON fica inválido e o Claude Desktop
-não arranca o servidor de todo:
+Para ligar as tools de escrita, acrescenta **duas** entradas ao bloco `env` — e a
+vírgula no fim da primeira, senão o JSON fica inválido e o Claude Desktop não
+arranca o servidor de todo:
 
 ```json
       "env": {
         "DATABASE_URL_READONLY": "postgresql://mcp_readonly:<password>@localhost:5434/distribuidor",
-        "DATABASE_URL_WRITE": "postgresql://mcp_escrita:<password>@localhost:5434/distribuidor"
+        "DATABASE_URL_WRITE": "postgresql://mcp_escrita:<password>@localhost:5434/distribuidor",
+        "MCP_PERFIL": "admin"
       }
 ```
+
+Sem o `MCP_PERFIL` ficas com as 4 tools de leitura, mesmo tendo a
+`DATABASE_URL_WRITE` ali. É de propósito: o papel é pedido por nome.
 
 > Se preferires ter as duas coisas em simultâneo — uma ligação só-de-leitura para
 > o dia-a-dia e outra com escrita para quando precisares —, regista **a mesma
 > build duas vezes**, com nomes diferentes e blocos `env` diferentes. É o mesmo
-> `dist/index.js`; a única diferença é aquela variável.
+> `dist/index.js`; a diferença é o `MCP_PERFIL`.
 
 Reinicia o Claude Desktop a seguir (fechar a janela não chega — tem de sair pelo
 ícone da barra de tarefas).
@@ -531,8 +605,8 @@ Três pormenores que dão dores de cabeça:
 - **Tem de estar compilado.** O `args` aponta para `dist/index.js`, não para o
   TypeScript. Se mexeres no código, `npm run build` antes de reiniciar.
 
-No log (`mcp-server-distribuidor.log`) confirma-se pelo número de tools: 4 em
-modo só-leitura, 7 com a escrita ligada.
+No log (`mcp-server-distribuidor.log`) confirma-se pela linha `perfil em uso:` e
+pelo número de tools: **4** no `employee`, **9** no `admin`.
 
 Os logs (o nosso stderr) ficam em `%AppData%\Claude\logs\mcp-server-distribuidor.log`.
 
@@ -542,10 +616,10 @@ Os logs (o nosso stderr) ficam em `%AppData%\Claude\logs\mcp-server-distribuidor
 claude mcp add distribuidor --env DATABASE_URL_READONLY="postgresql://mcp_readonly:<password>@localhost:5434/distribuidor" -- node C:\DEV\testesmcps\testeai-mcp-server\dist\index.js
 ```
 
-Com escrita, um segundo `--env`:
+Com escrita, mais dois `--env` (a ligação **e** o perfil):
 
 ```powershell
-claude mcp add distribuidor --env DATABASE_URL_READONLY="postgresql://mcp_readonly:<password>@localhost:5434/distribuidor" --env DATABASE_URL_WRITE="postgresql://mcp_escrita:<password>@localhost:5434/distribuidor" -- node C:\DEV\testesmcps\testeai-mcp-server\dist\index.js
+claude mcp add distribuidor --env DATABASE_URL_READONLY="postgresql://mcp_readonly:<password>@localhost:5434/distribuidor" --env DATABASE_URL_WRITE="postgresql://mcp_escrita:<password>@localhost:5434/distribuidor" --env MCP_PERFIL="admin" -- node C:\DEV\testesmcps\testeai-mcp-server\dist\index.js
 ```
 
 Ou, para o servidor ficar disponível só neste projeto, um `.mcp.json` na raiz com
@@ -556,17 +630,30 @@ o mesmo conteúdo do bloco `mcpServers` acima.
 O stdio acima é o modo de desenvolvimento local: um processo por cliente,
 lançado pelo próprio cliente. O **Streamable HTTP** é o outro cabo pelo qual o
 mesmo servidor pode ser servido — um processo à escuta num porto, vários
-clientes ao mesmo tempo — e é o transporte que a secção 5.3 do
-`docs/agentsystem-guide.md` exige para as ferramentas dos agentes.
+clientes ao mesmo tempo, **e vários papéis** — e é o modo que corre em produção.
+
+**Exige a `MCP_TOKEN_SEGREDO`, e recusa-se a arrancar sem ela.** Ver
+[Autenticação](#autenticação-só-no-modo-http).
 
 ```powershell
 npm run build
+$env:MCP_TOKEN_SEGREDO = "<pelo menos 32 caracteres>"
 npm run start:http          # ou: npm run dev:http (sem compilar)
 ```
 
 ```
+[mcp] autenticação por token ligada.
+[mcp] perfil 'employee': 4 tools — ...
+[mcp] perfil 'admin': 9 tools — ...
+[mcp] perfis servidos por este endpoint: employee, admin.
 [mcp] servidor pronto, à escuta em http://127.0.0.1:3000/mcp (Streamable HTTP).
 ```
+
+Repara na diferença face ao stdio: aqui **não há `MCP_PERFIL`**. Configuram-se
+todos os perfis que o ambiente permitir, e quem escolhe é o token de cada pedido.
+Um perfil sem configuração fica de fora e um token que o peça leva **403** — é
+assim que a escrita continua opt-in: sem `DATABASE_URL_WRITE`, o `admin` não
+existe neste endpoint.
 
 Para o apontar o Inspector: `npx @modelcontextprotocol/inspector`, e na UI
 escolher o transporte **Streamable HTTP** com o URL `http://127.0.0.1:3000/mcp`
@@ -592,16 +679,51 @@ arranque — e é isso que torna uma sessão barata: um `McpServer` e as closure
 suas tools, mais nada. O raciocínio completo, incluindo porque não é *stateless*,
 está no cabeçalho do `src/http.ts`.
 
+### Autenticação (só no modo HTTP)
+
+A identidade viaja num token Bearer assinado, e é o **papel** que vem lá dentro
+que decide as tools daquela sessão.
+
+**Porque é um token e não basic auth**, que é a pergunta óbvia: o `mcp_servers`
+do MCP connector da API da Anthropic aceita `type`, `url`, `name` e
+`authorization_token`, e mais nada. Não há campo para cabeçalhos arbitrários, e
+o `Authorization` é **um só** — credenciais embutidas no URL viram `Basic`, o
+`authorization_token` vira `Bearer`, e não cabem os dois. Um endpoint único com
+papéis obriga a que a identidade venha no token, e obriga a tirar o basic auth da
+infraestrutura à frente deste domínio. Não é preferência de estilo.
+
+| | |
+|---|---|
+| Formato | `base64url(claims).base64url(hmac-sha256)`, com `node:crypto` |
+| Claims | `sub`, `papel`, `iat`, `exp`, `aud="mcp-distribuidor"`, `jti` |
+| Validade | 15 minutos |
+| Segredo | `MCP_TOKEN_SEGREDO`, mínimo 32 caracteres |
+| Rotação | `MCP_TOKEN_SEGREDO_ANTERIOR`, aceite só na verificação |
+
+Não é JWT de propósito: aqui só existe um algoritmo e ele **não vem do token**,
+portanto o `alg` confuso não é um risco que se corra — é um campo que não existe.
+
+**Todos os métodos reautenticam**, e a sessão é confrontada com a identidade. O
+`Mcp-Session-Id` é criado no `initialize` e reutilizado depois; sem esse
+confronto, ele seria ele próprio uma credencial de longa duração e um token de
+`employee` podia continuar uma sessão aberta por um `admin`. Foi confirmado por
+sonda que o connector manda o `Authorization` em **todos** os pedidos da sessão,
+e não só no primeiro — é o que torna isto exequível.
+
+Emitir um token à mão:
+
+```powershell
+npx tsx scripts/emitirToken.ts admin --sujeito ana
+```
+
+(Com opções, sempre por `npx tsx` — o `npm run token` fica para si com os
+argumentos que começam por `--`.)
+
 ### O que ainda não está aqui
 
-Este modo é, para já, **só o transporte a funcionar localmente**. Por resolver,
-por ordem de importância:
-
-- **Sem autenticação e sem TLS.** Quem alcançar o porto chama as tools. Por isso
-  o servidor liga-se a `127.0.0.1` por omissão — mudar isso com `MCP_HTTP_HOST`
-  expõe a base de dados à rede. O guia trata disto a partir da secção 5.5/5.6;
-- **Sem multi-tenant.** Todas as sessões partilham os mesmos dois pools e,
-  portanto, a mesma identidade no Postgres (Fase 1 do guia);
+- **Sem TLS neste processo.** Termina-se o TLS à frente (Cloudflare + Traefik, em
+  produção). O servidor liga-se a `127.0.0.1` por omissão — mudar isso com
+  `MCP_HTTP_HOST` é um ato deliberado, para um deployment;
 - **Sem rate limiting**;
 - **Sessões sem expiração.** Um cliente que desapareça sem fazer `DELETE` deixa a
   sessão em memória até o processo reiniciar;
@@ -659,7 +781,10 @@ Todas com valores por omissão sensatos; ver o `.env.example`.
 | `MCP_TIMEOUT_MS` | 5000 | `statement_timeout` por query (leitura e escrita) |
 | `MCP_LIMITE_AUTOMATICO` | 200 | `LIMIT` acrescentado a queries sem um |
 | `MCP_LIMITE_MAXIMO` | 500 | `LIMIT` explícito máximo aceite |
-| `DATABASE_URL_WRITE` | *(vazia)* | Liga as tools de escrita. Vazia = servidor só-de-leitura |
+| `DATABASE_URL_WRITE` | *(vazia)* | A ligação do `mcp_escrita`. Sem ela o perfil `admin` não existe |
+| `MCP_PERFIL` | `employee` | Que perfil o processo serve. **Só no stdio** — no HTTP vem do token |
+| `MCP_TOKEN_SEGREDO` | — | **Obrigatória no modo HTTP.** Assina a identidade; mínimo 32 caracteres |
+| `MCP_TOKEN_SEGREDO_ANTERIOR` | *(vazia)* | Segredo antigo, aceite só na verificação, para rodar sem janela de falha |
 | `MCP_HTTP_PORT` | 3000 | Porto do endpoint MCP (só no modo HTTP) |
 | `MCP_HTTP_HOST` | 127.0.0.1 | Interface onde escuta. `0.0.0.0` expõe à rede — ver os avisos acima |
 | `MCP_HTTP_ORIGENS` | *(vazia)* | Origens aceites além das locais, separadas por vírgula |
