@@ -14,6 +14,8 @@
     "inspector": "npm run build && npx @modelcontextprotocol/inspector node dist/index.js",
     "teste": "npm run build && tsx scripts/testeCamadas.ts",
     "teste:escrita": "npm run build && tsx scripts/testeEscrita.ts",
+    "teste:http": "npm run build && tsx scripts/testeHttp.ts",
+    "token": "tsx scripts/emitirToken.ts",
     "cobertura": "tsx scripts/coberturaEvals.ts"
   },
   "dependencies": {

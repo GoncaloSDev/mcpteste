@@ -64,7 +64,11 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Hono } from "hono";
 
 import type { ContextoAcesso } from "./acesso/contexto.js";
-import { perfilPedidoNoAmbiente } from "./acesso/perfis.js";
+import { PERFIS } from "./acesso/perfis.js";
+import type { Registo } from "./acesso/registo.js";
+import { criarAutenticacao, type AmbienteMcp } from "./http/autenticacao.js";
+import { erroJsonRpc } from "./http/jsonrpc.js";
+import { lerSegredosDoAmbiente, type Identidade } from "./http/token.js";
 import { log, mensagemDoErro } from "./log.js";
 import {
   arrancarDependencias,
@@ -77,25 +81,25 @@ import {
 const CAMINHO_MCP = "/mcp";
 
 /**
- * As sessões vivas, indexadas pelo Mcp-Session-Id que o SDK gerou.
+ * Uma sessão viva.
  *
  * Guarda-se o TRANSPORTE e não o McpServer: é o transporte que sabe encaminhar
  * um pedido HTTP para a stream certa, e é ele que o servidor MCP tem do outro
  * lado do connect(). O McpServer fica preso a este por referência e é recolhido
  * com ele.
- */
-const sessoes = new Map<string, StreamableHTTPServerTransport>();
-
-/**
- * Um erro JSON-RPC para devolver antes de o transporte entrar em ação.
  *
- * O `id: null` é obrigatório pela especificação JSON-RPC quando o erro é tal que
- * nem se conseguiu apurar a que pedido dizia respeito — que é exatamente o caso
- * de todos os erros deste ficheiro (corpo ilegível, sessão desconhecida).
+ * A IDENTIDADE ficou aqui a partir da Fase 3, e é o que impede o `Mcp-Session-Id`
+ * de ser uma credencial: cada pedido traz o seu token, e a camada de autenticação
+ * confronta-o com esta identidade antes de o pedido chegar ao transporte. Sem
+ * isto, quem apanhasse um session-id de admin continuava a sessão dele.
  */
-function erroJsonRpc(codigo: number, mensagem: string) {
-  return { jsonrpc: "2.0" as const, error: { code: codigo, message: mensagem }, id: null };
+interface Sessao {
+  readonly transporte: StreamableHTTPServerTransport;
+  readonly identidade: Identidade;
 }
+
+/** As sessões vivas, indexadas pelo Mcp-Session-Id que o SDK gerou. */
+const sessoes = new Map<string, Sessao>();
 
 /**
  * Abre uma sessão: transporte novo, McpServer novo, ligados um ao outro.
@@ -104,7 +108,10 @@ function erroJsonRpc(codigo: number, mensagem: string) {
  * com o sessionIdGenerator, o devolve no cabeçalho Mcp-Session-Id da resposta ao
  * initialize e o exige em todos os pedidos seguintes.
  */
-async function abrirSessao(contexto: ContextoAcesso): Promise<StreamableHTTPServerTransport> {
+async function abrirSessao(
+  contexto: ContextoAcesso,
+  identidade: Identidade,
+): Promise<StreamableHTTPServerTransport> {
   // A anotação de tipo explícita não é decorativa: os callbacks abaixo referem
   // `transporte` dentro do seu próprio inicializador, e sem ela o TypeScript não
   // consegue inferir o tipo (referência circular). Em execução não há problema
@@ -118,8 +125,11 @@ async function abrirSessao(contexto: ContextoAcesso): Promise<StreamableHTTPServ
     // Só aqui, e não logo a seguir ao construtor, é que o ID existe. Registar a
     // sessão antes disto guardaria uma entrada com a chave `undefined`.
     onsessioninitialized: (id) => {
-      sessoes.set(id, transporte);
-      log(`sessão aberta: ${id} (${sessoes.size} ativa(s)).`);
+      sessoes.set(id, { transporte, identidade });
+      log(
+        `sessão aberta: ${id} — ${identidade.sujeito} como '${identidade.papel}' ` +
+          `(${sessoes.size} ativa(s)).`,
+      );
     },
 
     // O cliente pediu DELETE. O transporte já se encarrega de fechar as streams;
@@ -178,13 +188,14 @@ async function entregarAoTransporte(
   }
 }
 
-function criarApp(contexto: ContextoAcesso): Hono<{ Bindings: HttpBindings }> {
-  const app = new Hono<{ Bindings: HttpBindings }>();
+function criarApp(registo: Registo, segredos: readonly string[]): Hono<AmbienteMcp> {
+  const app = new Hono<AmbienteMcp>();
 
   /**
    * Validação do cabeçalho Origin.
    *
-   * NÃO é autenticação — a autenticação está explicitamente fora desta etapa.
+   * NÃO é autenticação — essa é a camada a seguir, no http/autenticacao.ts, e
+   * esta corre primeiro por ser mais barata: três linhas contra um HMAC.
    * É a proteção contra DNS rebinding que a especificação do MCP recomenda para
    * servidores locais, e o motivo é concreto: sem ela, qualquer página aberta no
    * browser desta máquina pode fazer POST a http://localhost:3000/mcp e correr
@@ -203,6 +214,24 @@ function criarApp(contexto: ContextoAcesso): Hono<{ Bindings: HttpBindings }> {
     await next();
   });
 
+  /**
+   * A AUTENTICAÇÃO. Depois da Origin (que é uma verificação de três linhas e
+   * dispensa HMAC nenhum) e antes de tudo o resto — em particular antes de o
+   * routing de sessões poder olhar para o Mcp-Session-Id.
+   *
+   * Corre nos TRÊS métodos por estar montada no caminho e não numa rota. Um
+   * método novo que alguém acrescente amanhã nasce autenticado, em vez de nascer
+   * aberto até alguém reparar.
+   */
+  app.use(
+    CAMINHO_MCP,
+    criarAutenticacao({
+      segredos,
+      contextoDoPapel: (papel) => registo.obter(papel),
+      identidadeDaSessao: (id) => sessoes.get(id)?.identidade,
+    }),
+  );
+
   // --- POST: as mensagens do cliente ------------------------------------------
   app.post(CAMINHO_MCP, async (c) => {
     // O corpo é lido AQUI, e não pelo transporte, porque é preciso espreitá-lo
@@ -217,7 +246,8 @@ function criarApp(contexto: ContextoAcesso): Hono<{ Bindings: HttpBindings }> {
     }
 
     const idSessao = c.req.header("mcp-session-id");
-    let transporte = idSessao === undefined ? undefined : sessoes.get(idSessao);
+    let transporte =
+      idSessao === undefined ? undefined : sessoes.get(idSessao)?.transporte;
 
     if (transporte === undefined) {
       // Um ID que não conhecemos. O 404 é o que a especificação manda, e é o que
@@ -236,7 +266,11 @@ function criarApp(contexto: ContextoAcesso): Hono<{ Bindings: HttpBindings }> {
           400,
         );
       }
-      transporte = await abrirSessao(contexto);
+      // O contexto e a identidade vêm da camada de autenticação, que já os pôs
+      // no pedido. É aqui que o papel de quem chama se torna a lista de tools que
+      // a sessão vai ter: o criarServidor() regista o que o perfil declara, e um
+      // employee fica com um McpServer onde o delete_row não existe.
+      transporte = await abrirSessao(c.get("contexto"), c.get("identidade"));
     }
 
     await entregarAoTransporte(transporte, c.env, corpo);
@@ -292,7 +326,7 @@ function sessaoDoPedido(idSessao: string | undefined): ResultadoSessao {
       estadoHttp: 400,
     };
   }
-  const transporte = sessoes.get(idSessao);
+  const transporte = sessoes.get(idSessao)?.transporte;
   if (transporte === undefined) {
     return {
       transporte: undefined,
@@ -328,36 +362,37 @@ function origemPermitida(origem: string): boolean {
 async function main(): Promise<void> {
   // --- 1. Dependências externas, antes de tudo o resto -----------------------
   //
-  // POR ENQUANTO um perfil por processo, escolhido pelo MCP_PERFIL tal como no
-  // stdio — que é exatamente o comportamento que este servidor sempre teve, com a
-  // diferença de o papel passar a ser dito por um nome em vez de deduzido da
-  // presença de uma password de escrita no ambiente. Configura-se só ele, e por
-  // isso um endpoint de leitura continua a não ter credencial de escrita nenhuma
-  // no processo.
-  //
-  // É AQUI QUE A AUTENTICAÇÃO ENTRA, e são estas duas linhas que ela substitui:
-  // passa-se `PERFIS` ao arranque, para o registo ter os contextos todos prontos,
-  // e o `exigir` desce para dentro do pedido, com o nome a vir do token em vez do
-  // ambiente. O registo já sabe servir vários perfis ao mesmo tempo e o
-  // criarServidor() já monta as tools do contexto que recebe — falta só o que
-  // decide QUEM está do outro lado.
-  const perfil = perfilPedidoNoAmbiente();
+  // PRIMEIRO O SEGREDO, antes de se abrir uma única ligação ao Postgres. Falha
+  // com exceção se não existir, e é essa a política: com o basic auth do Traefik
+  // fora deste domínio — que é a consequência mecânica de o connector só ter um
+  // cabeçalho Authorization —, um servidor sem token não é um servidor degradado,
+  // é a base de dados aberta a quem souber o URL.
+  const segredos = lerSegredosDoAmbiente();
+  log(
+    `autenticação por token ligada${segredos.length > 1 ? " (a aceitar também o segredo anterior)" : ""}.`,
+  );
 
-  // Igual ao stdio, e de propósito: um servidor que abre o porto HTTP antes de
+  // TODOS os perfis, e não um só. É a diferença que a autenticação traz: o papel
+  // deixou de ser uma propriedade do processo e passou a vir de quem chama, por
+  // sessão. Os perfis que não estiverem configurados neste deployment ficam
+  // simplesmente de fora, e um token que os peça leva 403 — é assim que a escrita
+  // continua opt-in: sem DATABASE_URL_WRITE, o `admin` não existe aqui.
+  //
+  // Igual ao stdio no que interessa: um servidor que abre o porto HTTP antes de
   // saber se tem base de dados só dá o erro ao primeiro cliente que se ligar.
-  const registo = await arrancarDependencias([perfil]);
-  const contexto = registo.exigir(perfil.nome);
-  log(`perfil em uso: ${contexto.perfil.nome}.`);
+  const registo = await arrancarDependencias(PERFIS);
+  log(`perfis servidos por este endpoint: ${registo.disponiveis.join(", ")}.`);
 
   // --- 2. O endpoint ---------------------------------------------------------
 
   const porta = lerPorta();
-  // Loopback por omissão. Não é segurança a sério — é o mínimo para que um
-  // servidor sem autenticação nenhuma (ver o topo do ficheiro) não fique exposto
-  // à rede local por distração. Pôr 0.0.0.0 aqui tem de ser um ato deliberado.
+  // Loopback por omissão. Continua a não ser segurança a sério — agora há
+  // autenticação por token à frente de tudo, mas o valor omisso mantém-se
+  // fechado: pôr 0.0.0.0 aqui é o que um deployment faz, e tem de ser um ato
+  // deliberado e não o que acontece a quem não leu.
   const anfitriao = process.env["MCP_HTTP_HOST"] ?? "127.0.0.1";
 
-  const app = criarApp(contexto);
+  const app = criarApp(registo, segredos);
   const servidorHttp: ServerType = serve({ fetch: app.fetch, port: porta, hostname: anfitriao }, () => {
     log(`servidor pronto, à escuta em http://${anfitriao}:${porta}${CAMINHO_MCP} (Streamable HTTP).`);
   });
@@ -367,8 +402,8 @@ async function main(): Promise<void> {
   registarEncerramento(async () => {
     // Primeiro as sessões: fechar as streams SSE abertas, senão o close() do
     // servidor HTTP fica à espera delas para sempre.
-    for (const transporte of [...sessoes.values()]) {
-      await transporte.close();
+    for (const sessao of [...sessoes.values()]) {
+      await sessao.transporte.close();
     }
     sessoes.clear();
 
