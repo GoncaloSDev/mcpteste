@@ -11,8 +11,16 @@
  *   npx tsx scripts/emitirToken.ts admin --sujeito ana --validade 60
  *   npx tsx scripts/emitirToken.ts employee --curl https://mcp.exemplo.pt
  *
+ * SEMPRE POR `npx tsx`, e não por `npm run token`, quando houver opções. O npm
+ * fica com os argumentos que começam por `--` para si — um `npm run token --
+ * admin --curl https://...` chega aqui como `admin https://...`, sem o `--curl`,
+ * e o script emite o token e salta caladamente a parte que se lhe pediu. Custou
+ * um passo de uma sessão de deployment a descobrir. Sem opções (`npm run token
+ * admin`) não há problema nenhum.
+ *
  * O token sai no stdout e mais nada, para poder ir direto para uma variável de
- * shell. Tudo o resto vai para o stderr.
+ * shell. Tudo o resto vai para o stderr — incluindo os erros, o que quer dizer
+ * que um `2>$null` a apanhar o token esconde a razão de ele não ter saído.
  */
 
 import "dotenv/config";
