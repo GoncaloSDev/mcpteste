@@ -22,12 +22,18 @@
  */
 
 // Carregado aqui porque o teste PRÓPRIO precisa de saber se a escrita está
-// configurada, antes de lançar o servidor. O servidor filho volta a carregá-lo
-// por sua conta — herda o ambiente deste processo, mas não depende disso.
+// configurada, antes de lançar o servidor. O servidor filho carrega o .env por
+// sua conta, e é bom que carregue: o StdioClientTransport NÃO lhe passa o
+// ambiente deste processo — só um punhado de variáveis do sistema (PATH,
+// APPDATA, ...), por segurança. Tudo o que o filho precisar de saber deste lado
+// tem de ir explicitamente no `env` do transporte, mais abaixo.
 import "dotenv/config";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import {
+  getDefaultEnvironment,
+  StdioClientTransport,
+} from "@modelcontextprotocol/sdk/client/stdio.js";
 
 /** Nº de cliente de teste. Fora do intervalo do seed, para não colidir. */
 const NO_CLI_TESTE = 999999;
@@ -50,6 +56,14 @@ async function main(): Promise<void> {
     command: "node",
     args: ["dist/index.js"],
     stderr: "pipe",
+    // O PERFIL É PEDIDO POR NOME, e é isto que este teste passou a exercitar além
+    // do que já exercitava: ter a DATABASE_URL_WRITE no .env deixou de bastar
+    // para haver tools de escrita. O servidor arranca no perfil de omissão —
+    // `employee`, quatro tools — a menos que alguém peça outro, e quem pede é o
+    // cliente MCP, no `env` com que lança o processo. Sem esta linha as cinco
+    // tools não existem e o teste falha logo na primeira verificação, que é
+    // exatamente o que se quer que aconteça a um employee.
+    env: { ...getDefaultEnvironment(), MCP_PERFIL: "admin" },
   });
 
   const cliente = new Client({ name: "teste-escrita", version: "1.0.0" });

@@ -46,27 +46,22 @@ export interface EscritaArrancada {
 }
 
 /**
- * Liga o modo de escrita, se estiver configurado.
+ * Abre a ligação de escrita e verifica que ela é quem devia ser.
  *
- * Devolve `null` — sem erro, sem aviso — quando a DATABASE_URL_WRITE não existe.
- * A escrita é OPT-IN: um servidor sem essa variável arranca exatamente como
- * sempre arrancou, com as 4 tools de leitura e mais nada. É isso que permite ter
- * a mesma build registada duas vezes no cliente MCP, uma só-leitura e outra com
- * escrita, sem tocar em código.
+ * Falha com exceção se a ligação não servir, ou se for de superutilizador. Um
+ * modo de escrita "meio ligado" é pior do que nenhum.
  *
- * Falha com exceção se a variável existir mas a ligação não servir. Um modo de
- * escrita "meio ligado" é pior do que nenhum.
+ * DEIXOU DE DEVOLVER `null`. A escrita continua OPT-IN, mas a decisão de a ligar
+ * ou não subiu para o registo (acesso/registo.ts): é lá que se sabe que perfis
+ * existem, que variáveis cada um precisa e quais delas estão definidas. Aqui em
+ * baixo, "não há variável" era um `null` que o chamador tinha de se lembrar de
+ * tratar; lá em cima é um perfil que simplesmente não fica disponível, e um
+ * pedido para o usar recebe uma mensagem que diz o que falta.
+ *
+ * A connection string vem por parâmetro pela mesma razão que no db.ts — ver a
+ * nota no arrancarBaseDeDados().
  */
-export async function arrancarEscrita(): Promise<EscritaArrancada | null> {
-  // Lido aqui dentro, e não no corpo do módulo, pela mesma razão que no db.ts:
-  // em ESM os imports são avaliados antes da primeira linha do index.ts, e um
-  // process.env lido no topo do ficheiro correria antes de o dotenv carregar.
-  const connectionString = process.env["DATABASE_URL_WRITE"];
-
-  if (connectionString === undefined || connectionString.trim() === "") {
-    return null;
-  }
-
+export async function arrancarEscrita(connectionString: string): Promise<EscritaArrancada> {
   const timeoutMs = lerTimeoutDoAmbiente();
 
   const pool = new Pool({

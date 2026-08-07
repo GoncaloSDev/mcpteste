@@ -19,11 +19,11 @@
  * ------------------------------------------------------------------------------
  *
  * O argumento dos pools NÃO é o que decide isto, ao contrário do que parece à
- * primeira vista. Os dois pools — leitura sempre, escrita opt-in — são variáveis
- * de módulo do db.ts e do db-escrita.ts, abertas uma vez pelo
- * arrancarDependencias() antes de o socket HTTP sequer existir. Nenhum dos dois
- * modos lhes toca por pedido; em qualquer deles os pools são do PROCESSO, não da
- * sessão. O que os pools decidem é outra coisa: como não pertencem à sessão,
+ * primeira vista. Os pools — um por connection string, leitura sempre, escrita
+ * opt-in — são abertos uma vez pelo arrancarDependencias(), antes de o socket
+ * HTTP sequer existir, e ficam no registo de perfis. Nenhum dos dois modos lhes
+ * toca por pedido; em qualquer deles os pools são do PROCESSO, não da sessão.
+ * O que os pools decidem é outra coisa: como não pertencem à sessão,
  * uma sessão em memória custa um McpServer e as closures das suas tools, e mais
  * nada. Guardar sessões é barato precisamente por isso.
  *
@@ -64,6 +64,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Hono } from "hono";
 
 import type { ContextoAcesso } from "./acesso/contexto.js";
+import { perfilPedidoNoAmbiente } from "./acesso/perfis.js";
 import { log, mensagemDoErro } from "./log.js";
 import {
   arrancarDependencias,
@@ -327,9 +328,26 @@ function origemPermitida(origem: string): boolean {
 async function main(): Promise<void> {
   // --- 1. Dependências externas, antes de tudo o resto -----------------------
   //
+  // POR ENQUANTO um perfil por processo, escolhido pelo MCP_PERFIL tal como no
+  // stdio — que é exatamente o comportamento que este servidor sempre teve, com a
+  // diferença de o papel passar a ser dito por um nome em vez de deduzido da
+  // presença de uma password de escrita no ambiente. Configura-se só ele, e por
+  // isso um endpoint de leitura continua a não ter credencial de escrita nenhuma
+  // no processo.
+  //
+  // É AQUI QUE A AUTENTICAÇÃO ENTRA, e são estas duas linhas que ela substitui:
+  // passa-se `PERFIS` ao arranque, para o registo ter os contextos todos prontos,
+  // e o `exigir` desce para dentro do pedido, com o nome a vir do token em vez do
+  // ambiente. O registo já sabe servir vários perfis ao mesmo tempo e o
+  // criarServidor() já monta as tools do contexto que recebe — falta só o que
+  // decide QUEM está do outro lado.
+  const perfil = perfilPedidoNoAmbiente();
+
   // Igual ao stdio, e de propósito: um servidor que abre o porto HTTP antes de
   // saber se tem base de dados só dá o erro ao primeiro cliente que se ligar.
-  const contexto = await arrancarDependencias();
+  const registo = await arrancarDependencias([perfil]);
+  const contexto = registo.exigir(perfil.nome);
+  log(`perfil em uso: ${contexto.perfil.nome}.`);
 
   // --- 2. O endpoint ---------------------------------------------------------
 

@@ -30,6 +30,7 @@ import type pg from "pg";
 
 import { executarSoLeitura, type LigacaoLeitura, type OpcoesLeitura } from "../db.js";
 import { executarEscrita, type LigacaoEscrita, type OpcoesEscrita } from "../db-escrita.js";
+import type { Perfil, PerfilEscrita, PerfilLeitura } from "./perfis.js";
 
 /**
  * Assinatura de uma leitura, já presa a uma ligação.
@@ -67,8 +68,16 @@ export interface ExecutorEscrita {
  * saber que papéis existem.
  */
 export interface ContextoLeitura {
-  /** Nome do perfil, só para logs e mensagens. Nunca é usado para decidir nada. */
-  readonly perfil: string;
+  /**
+   * O perfil que este contexto serve.
+   *
+   * Era uma string, e era só para logs. Passou a ser o registo declarativo
+   * completo (perfis.ts) porque alguém tem de responder a "que tools é que este
+   * papel vê?", e a resposta pertence ao perfil e não a um `if` no servidor.ts.
+   * Continua a NÃO decidir permissões: quem as decide é o tipo deste contexto,
+   * no momento do registo, e a Camada 0 do Postgres por baixo de tudo.
+   */
+  readonly perfil: Perfil;
   readonly executarLeitura: ExecutorLeitura;
   /** O timeout em vigor, para as tools o poderem mencionar nas respostas. */
   readonly timeoutMs: number;
@@ -85,6 +94,13 @@ export interface ContextoLeitura {
  * leitura corre como o utilizador menos privilegiado".
  */
 export interface ContextoEscrita extends ContextoLeitura {
+  /**
+   * Estreitado de propósito. Um contexto que escreve traz sempre um perfil que
+   * declara a ligação e a lista de tools de escrita — é o que permite ao
+   * criarServidor() ler `contexto.perfil.escrita.tools` sem verificação nenhuma
+   * depois de o `temEscrita()` ter estreitado o contexto.
+   */
+  readonly perfil: PerfilEscrita;
   readonly executarEscrita: ExecutorEscrita;
 }
 
@@ -102,10 +118,15 @@ export function temEscrita(contexto: ContextoAcesso): contexto is ContextoEscrit
   return "executarEscrita" in contexto;
 }
 
-/** Constrói o contexto de um perfil só-de-leitura. */
-export function criarContextoLeitura(perfil: string, ligacao: LigacaoLeitura): ContextoLeitura {
+/**
+ * A metade de leitura, que os dois contextos partilham.
+ *
+ * Extraída para as duas fábricas não duplicarem a closure do executor. Não é
+ * exportada: um contexto tem de nascer sempre emparelhado com um perfil, e é esse
+ * emparelhamento que as duas funções abaixo garantem.
+ */
+function metadeDeLeitura(ligacao: LigacaoLeitura): Omit<ContextoLeitura, "perfil"> {
   return {
-    perfil,
     timeoutMs: ligacao.timeoutMs,
     executarLeitura: <T extends pg.QueryResultRow>(
       sql: string,
@@ -116,17 +137,34 @@ export function criarContextoLeitura(perfil: string, ligacao: LigacaoLeitura): C
 }
 
 /**
+ * Constrói o contexto de um perfil só-de-leitura.
+ *
+ * Exige um `PerfilLeitura` e não um `Perfil` qualquer, e a diferença não é
+ * cosmética: assim não é possível construir um contexto sem escrita a partir de
+ * um perfil que declara tools de escrita. Esse par seria um servidor a registar
+ * caladamente menos tools do que o perfil promete — o pior modo de falha
+ * possível, porque não dá erro nenhum.
+ */
+export function criarContextoLeitura(
+  perfil: PerfilLeitura,
+  ligacao: LigacaoLeitura,
+): ContextoLeitura {
+  return { perfil, ...metadeDeLeitura(ligacao) };
+}
+
+/**
  * Constrói o contexto de um perfil com escrita.
  *
  * Recebe as DUAS ligações, e a de leitura é a mesma que os outros perfis usam.
  */
 export function criarContextoEscrita(
-  perfil: string,
+  perfil: PerfilEscrita,
   ligacaoLeitura: LigacaoLeitura,
   ligacaoEscrita: LigacaoEscrita,
 ): ContextoEscrita {
   return {
-    ...criarContextoLeitura(perfil, ligacaoLeitura),
+    perfil,
+    ...metadeDeLeitura(ligacaoLeitura),
     executarEscrita: <T extends pg.QueryResultRow>(
       sql: string,
       parametros: unknown[],

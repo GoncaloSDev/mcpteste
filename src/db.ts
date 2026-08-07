@@ -61,22 +61,19 @@ export interface LeituraArrancada {
  * arranca sem base de dados só descobre o problema na primeira tool chamada, e
  * aí o erro aparece ao utilizador no meio de uma conversa em vez de aparecer no
  * arranque, onde é fácil de ver.
+ *
+ * A CONNECTION STRING VEM DE FORA, e isso é o que permite haver um pool por
+ * ligação em vez de um pool por perfil: quem chama é o registo (acesso/registo.ts),
+ * que resolve o nome da variável de ambiente declarado no perfil e memoriza o
+ * resultado pela própria string. Dois perfis que partilhem a `DATABASE_URL_READONLY`
+ * — que hoje são todos — partilham um pool, e um papel novo não custa ligações
+ * novas ao Postgres.
+ *
+ * A leitura do ambiente ficou toda do lado do registo, de propósito: era aqui que
+ * estava o único sítio do ficheiro que sabia o NOME de uma variável, e um módulo
+ * que abre pools não tem nada que saber como é que a configuração se chama.
  */
-export async function arrancarBaseDeDados(): Promise<LeituraArrancada> {
-  // A variável é lida AQUI DENTRO, e não no corpo do módulo, de propósito: em
-  // ESM os imports são todos avaliados antes de correr a primeira linha do
-  // index.ts. Se isto estivesse no topo do ficheiro, corria antes de o
-  // "import dotenv/config" ter carregado o .env, e viria sempre undefined.
-  const connectionString = process.env["DATABASE_URL_READONLY"];
-
-  if (connectionString === undefined || connectionString.trim() === "") {
-    throw new Error(
-      "A variável de ambiente DATABASE_URL_READONLY não está definida.\n" +
-        "Copia o .env.example para .env e preenche-a, ou define-a no bloco 'env' da\n" +
-        "configuração do cliente MCP (ver o README).",
-    );
-  }
-
+export async function arrancarBaseDeDados(connectionString: string): Promise<LeituraArrancada> {
   const timeoutMs = lerTimeoutDoAmbiente();
 
   const pool = new Pool({
